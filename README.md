@@ -1,9 +1,17 @@
+<center>
+
 # QThreadWithReturn
+
+![QThreadWithReturn](https://socialify.git.ci/271374667/QThreadWithReturn/image?description=1&language=1&name=1&pattern=Plus&theme=Auto)
+
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![PySide6](https://img.shields.io/badge/PySide6-6.4+-green.svg)](https://www.qt.io/qt-for-python)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-73%20passed-brightgreen.svg)](tests/)
+
+
+</center>
 
 **PySide6 高级线程工具库** - 专为 GUI 应用设计的线程解决方案，让界面永不卡顿，多线程编程变得简单直观。
 

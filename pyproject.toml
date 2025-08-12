@@ -1,31 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "qthreadwithreturn"
 version = "1.1.0"
 description = "PySide6 高级线程工具库 - 带返回值的线程类和线程池执行器"
-readme = "README.md"
-license = {file = "LICENSE"}
+readme = {file = "README.md", content-type = "text/markdown"}
+license = "MIT"
 authors = [
     {name = "PythonImporter", email = "271374667@qq.com"},
 ]
-keywords = ["qt", "pyside6", "threading", "concurrent", "futures", "gui"]
+maintainers = [
+    {name = "PythonImporter", email = "271374667@qq.com"},
+]
+keywords = ["qt", "pyside6", "threading", "concurrent", "futures", "gui", "pyqt", "async", "thread-pool", "worker-thread"]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Software Development :: User Interfaces",
-    "Framework :: Qt",
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "pyside6>=6.9.1",
+    "pyside6>=6.4.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qthreadwithreturn*"]
+exclude = ["tests*", "demo*", "examples*"]
+
+[tool.setuptools.package-data]
+qthreadwithreturn = ["py.typed"]
+
+[project.urls]
+Homepage = "https://github.com/271374667/QThreadWithReturn"
+Repository = "https://github.com/271374667/QThreadWithReturn.git"
+Issues = "https://github.com/271374667/QThreadWithReturn/issues"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
