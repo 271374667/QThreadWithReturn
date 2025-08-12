@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QFont, QTextCursor
 )
 
-from qthread_with_return import QThreadWithReturn, QThreadPoolExecutor
+from qthreadwithreturn import QThreadWithReturn, QThreadPoolExecutor
 
 
 class AnimatedProgressBar(QProgressBar):
