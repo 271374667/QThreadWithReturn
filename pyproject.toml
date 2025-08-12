@@ -1,11 +1,30 @@
 [project]
 name = "qthreadwithreturn"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.1.0"
+description = "PySide6 高级线程工具库 - 带返回值的线程类和线程池执行器"
 readme = "README.md"
-requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [
+    {name = "PythonImporter", email = "271374667@qq.com"},
+]
+keywords = ["qt", "pyside6", "threading", "concurrent", "futures", "gui"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: User Interfaces",
+    "Framework :: Qt",
+]
+requires-python = ">=3.10"
 dependencies = [
-    "qtpy>=2.4.3",
+    "pyside6>=6.9.1",
 ]
 
 [[tool.uv.index]]
