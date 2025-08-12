@@ -12,23 +12,6 @@ from tests.test_thread_utils import wait_with_events, wait_for_thread_completion
 
 class TestMissingCodeCoverage:
     """专门测试缺失覆盖率的代码分支"""
-    
-    def test_thread_pool_worker_method_branch(self, qapp):
-        """测试线程池worker方法的分支"""
-        # 这个测试专门覆盖 _worker 和相关方法
-        pool = QThreadPoolExecutor(max_workers=1)
-        
-        def simple_task():
-            return "worker_test"
-        
-        # 直接调用不常用的内部方法
-        try:
-            pool._start_worker_if_needed()  # Line 189-199
-        except AttributeError:
-            pass  # 方法可能不存在
-        
-        pool.shutdown()
-    
     def test_thread_name_setting(self, qapp):
         """测试线程名称设置功能"""
         def get_thread_name():

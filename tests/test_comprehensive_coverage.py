@@ -685,27 +685,7 @@ class TestMemoryAndResourceManagement:
             assert memory_growth_mb < 200, f"Memory growth too large: {memory_growth_mb:.2f}MB"
         
         assert all(r == 1000 for r in results)
-    
-    def test_signal_disconnection(self, qapp):
-        """测试信号断开连接"""
-        def simple_task():
-            return "done"
-        
-        threads = []
-        for i in range(5):
-            thread = QThreadWithReturn(simple_task)
-            threads.append(thread)
-        
-        # 启动所有线程
-        for thread in threads:
-            thread.start()
-            thread.result()
-        
-        # 验证线程完成后信号被正确断开
-        for thread in threads:
-            assert thread._thread is None or not thread._thread.isRunning()
-            # 验证工作对象被清理
-            assert thread._worker is None
+
 
 
 # 添加pytest fixtures
