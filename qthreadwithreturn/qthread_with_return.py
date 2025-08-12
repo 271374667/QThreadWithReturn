@@ -193,17 +193,6 @@ class QThreadPoolExecutor:
             future.finished_signal.connect(make_safe_on_finished(future))
             future.start()
 
-    def _start_worker_if_needed(self):
-        """如果线程池未满，则启动新线程。（已废弃，使用QThreadWithReturn）"""
-        # 这个方法已经不再使用，因为我们直接使用QThreadWithReturn
-        pass
-
-    def _worker(self):
-        """工作线程主循环。（已废弃，使用QThreadWithReturn）"""
-        # 这个方法已经不再使用，因为我们直接使用QThreadWithReturn
-        pass
-
-
     def shutdown(
         self,
         wait: bool = True,
