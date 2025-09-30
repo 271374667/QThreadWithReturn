@@ -119,7 +119,18 @@ class QThreadPoolExecutor:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """退出 with 语句时自动关闭线程池。"""
-        self.shutdown(wait=True)
+        try:
+            # 如果有异常，强制关闭避免hang
+            if exc_type is not None:
+                self.shutdown(wait=False, force_stop=True)
+            else:
+                self.shutdown(wait=True)
+        except Exception:
+            # 确保即使shutdown失败也不会抛出异常
+            try:
+                self.shutdown(wait=False, force_stop=True)
+            except Exception:
+                pass  # 最后的清理尝试
 
     def submit(self, fn: Callable, /, *args, **kwargs) -> "QThreadWithReturn":
         """提交任务到线程池执行。
@@ -178,19 +189,27 @@ class QThreadPoolExecutor:
                     self._try_start_tasks()
                 return on_finished
 
-            # 使用弱引用连接避免循环引用
+            # 使用弱引用连接避免循环引用，增加shutdown检查避免死锁
             import weakref
             weak_self = weakref.ref(self)
             def make_safe_on_finished(fut):
                 def safe_on_finished():
                     strong_self = weak_self()
-                    if strong_self is not None:
-                        strong_self._running_workers -= 1
-                        strong_self._active_futures.discard(fut)
-                        strong_self._try_start_tasks()
+                    if strong_self is not None and not strong_self._shutdown:
+                        try:
+                            strong_self._running_workers -= 1
+                            strong_self._active_futures.discard(fut)
+                            # 在shutdown状态下不再尝试启动新任务
+                            if not strong_self._shutdown:
+                                strong_self._try_start_tasks()
+                        except Exception:
+                            # 忽略shutdown期间的信号处理异常
+                            pass
                 return safe_on_finished
             
-            future.finished_signal.connect(make_safe_on_finished(future))
+            # Fix #4: Add connection tracking in QThreadPoolExecutor.submit()
+            connection = future.finished_signal.connect(make_safe_on_finished(future))
+            future._pool_connection = connection
             future.start()
 
     def shutdown(
@@ -231,8 +250,16 @@ class QThreadPoolExecutor:
                         pass  # 忽略取消时的异常
                 self._pending_tasks.clear()
                 
-            # 处理活跃任务
+            # Fix #4: Disconnect before clearing in shutdown()
             active_copy = list(self._active_futures)
+            for future in active_copy:
+                try:
+                    if hasattr(future, '_pool_connection'):
+                        future.finished_signal.disconnect(future._pool_connection)
+                        del future._pool_connection
+                except (RuntimeError, TypeError):
+                    pass
+
             if force_stop:
                 for future in active_copy:
                     try:
@@ -241,19 +268,33 @@ class QThreadPoolExecutor:
                         pass  # 忽略强制停止时的异常
                         
         if wait:
-            # 等待所有活跃任务完成
+            # 等待所有活跃任务完成，使用非阻塞检查避免deadlock
             import time
             start_time = time.time()
-            timeout_per_task = 30.0
+            max_wait_time = 10.0  # 减少最大等待时间避免死锁
             
-            for future in active_copy:
-                try:
-                    # 动态调整超时时间，避免总时间过长
-                    elapsed = time.time() - start_time
-                    remaining_timeout = max(1.0, timeout_per_task - elapsed)
-                    future.result(timeout=remaining_timeout)
-                except Exception:
-                    pass  # 忽略获取结果时的异常
+            # 使用轮询而不是阻塞等待来避免Qt事件循环死锁
+            while active_copy and (time.time() - start_time) < max_wait_time:
+                completed_futures = []
+                for future in active_copy[:]:  # 创建副本避免修改时迭代
+                    try:
+                        if future.done():
+                            completed_futures.append(future)
+                        else:
+                            # 非阻塞检查，避免调用result()导致的死锁
+                            future.wait(50, force_stop=False)  # 50ms非阻塞检查
+                    except Exception:
+                        completed_futures.append(future)  # 出错也视为完成
+                
+                # 移除已完成的future
+                for future in completed_futures:
+                    active_copy.remove(future)
+                
+                if not active_copy:
+                    break
+                    
+                # 短暂休眠避免CPU占用过高
+                time.sleep(0.01)
                     
             # 清理剩余引用
             self._active_futures.clear()
@@ -298,13 +339,13 @@ class QThreadPoolExecutor:
                 elapsed = time.monotonic() - start_time
                 if elapsed > timeout:
                     raise TimeoutError()
-            # 处理Qt事件，避免阻塞
+            # CRITICAL FIX: Must process Qt events to allow futures to complete
+            # Previously just slept, preventing signal/callback execution
             from PySide6.QtWidgets import QApplication
-
             app = QApplication.instance()
-            if app:
-                app.processEvents()
-            time.sleep(0.01)
+            if app is not None:
+                app.processEvents()  # Process events to allow futures to complete
+            time.sleep(0.001)  # 1ms minimum delay to avoid CPU spinning
 
 
 class QThreadWithReturn(QObject):
@@ -392,12 +433,16 @@ class QThreadWithReturn(QObject):
         # 线程同步
         self._mutex: QMutex = QMutex()
         self._wait_condition: QWaitCondition = QWaitCondition()
-        
+
         # 备用同步机制（用于无Qt应用时）
         self._completion_event = threading.Event()
-        
+
         # 信号连接状态跟踪
         self._signals_connected: bool = False
+
+        # SECURITY FIX: Cleanup re-entry protection
+        self._cleanup_in_progress: bool = False
+        self._cleanup_lock: threading.Lock = threading.Lock()
 
     def add_done_callback(self, callback: Callable) -> None:
         """添加任务成功完成后的回调函数。
@@ -469,6 +514,8 @@ class QThreadWithReturn(QObject):
         if not self._thread:
             self._is_cancelled = True
             self._is_finished = True
+            # Fix #2: Clear callbacks in early cancel path
+            self._clear_callbacks()
             self.finished_signal.emit()
             return True
 
@@ -494,6 +541,8 @@ class QThreadWithReturn(QObject):
                 except AttributeError:
                     pass
                 self._thread_really_finished = True
+                # Fix #6: Clear callbacks in force-stop path
+                self._clear_callbacks()
                 self._cleanup_resources()
             else:
                 try:
@@ -773,12 +822,15 @@ class QThreadWithReturn(QObject):
         else:
             wait_timeout = max(1, timeout_ms)  # 确保至少1ms
 
-        # 使用Qt线程的wait方法
+        # 使用Qt线程的wait方法，增加安全检查
         try:
-            result = self._thread.wait(wait_timeout)
+            if self._thread and self._thread.isRunning():
+                result = self._thread.wait(wait_timeout)
+            else:
+                result = True  # 线程未运行或已结束
         except Exception:
             # 如果Qt wait失败，检查状态
-            result = self._is_finished or self._thread_really_finished
+            result = self._is_finished or self._thread_really_finished or not (self._thread and self._thread.isRunning())
 
         # 如果等待超时但需要强制停止
         if not result and force_stop and self._thread and self._thread.isRunning():
@@ -876,14 +928,20 @@ class QThreadWithReturn(QObject):
         if self._thread:
             self._thread.quit()
 
-        # 在主线程中调用回调函数
+        # Fix #3: Fix non-Qt mode QTimer usage - check for Qt application before using QTimer
         if self._done_callback:
             try:
-                # 保存回调引用和参数，避免竞态条件下被清理
+                from PySide6.QtWidgets import QApplication
+                app = QApplication.instance()
                 callback = self._done_callback
                 callback_params = self._done_callback_params
-                QTimer.singleShot(0, lambda r=result, cb=callback, cp=callback_params: 
-                                 self._execute_callback_safely(cb, r, cp, "done_callback"))
+                if app is not None:
+                    # Qt mode: schedule in event loop
+                    QTimer.singleShot(0, lambda r=result, cb=callback, cp=callback_params:
+                                     self._execute_callback_safely(cb, r, cp, "done_callback"))
+                else:
+                    # Non-Qt mode: execute directly
+                    self._execute_callback_safely(callback, result, callback_params, "done_callback")
             except Exception as e:
                 print(f"Error scheduling done callback: {e}", file=sys.stderr)
 
@@ -932,14 +990,20 @@ class QThreadWithReturn(QObject):
         if self._thread:
             self._thread.quit()
 
-        # 在主线程中调用失败回调函数
+        # Fix #3: Fix non-Qt mode QTimer usage - check for Qt application before using QTimer
         if self._failure_callback:
             try:
-                # 保存回调引用和参数，避免竞态条件下被清理
+                from PySide6.QtWidgets import QApplication
+                app = QApplication.instance()
                 callback = self._failure_callback
                 callback_params = self._failure_callback_params
-                QTimer.singleShot(0, lambda exc=exception, cb=callback, cp=callback_params: 
-                                 self._execute_failure_callback_safely(cb, exc, cp))
+                if app is not None:
+                    # Qt mode: schedule in event loop
+                    QTimer.singleShot(0, lambda exc=exception, cb=callback, cp=callback_params:
+                                     self._execute_failure_callback_safely(cb, exc, cp))
+                else:
+                    # Non-Qt mode: execute directly
+                    self._execute_failure_callback_safely(callback, exception, callback_params)
             except Exception as e:
                 print(f"Error scheduling failure callback: {e}", file=sys.stderr)
 
@@ -978,11 +1042,57 @@ class QThreadWithReturn(QObject):
             print(f"Error in failure callback: {e}", file=sys.stderr)
 
     def _on_thread_finished(self) -> None:
-        """处理线程真正完成的信号"""
+        """处理线程真正完成的信号 - SECURITY HARDENED"""
         self._thread_really_finished = True
-        
+
+        # CRITICAL FIX: Defer signal disconnection to allow queued _on_finished() to execute
+        # The issue: _on_thread_finished() is called first, disconnecting worker signals
+        # before the queued _on_finished() slot can run, breaking all callbacks.
+        # Solution: Use QTimer to defer cleanup, ensuring _on_finished() executes first.
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QTimer
+
+        app = QApplication.instance()
+        if app is not None:
+            # Defer cleanup by 50ms to ensure queued _on_finished() AND callbacks complete
+            # This is safe because the thread has already finished
+            # Need enough time for: _on_finished() → callback scheduling → callback execution
+            QTimer.singleShot(50, self._perform_delayed_cleanup)
+        else:
+            # No Qt app - no event loop, safe to cleanup immediately
+            self._perform_delayed_cleanup()
+
+    def _perform_delayed_cleanup(self) -> None:
+        """Execute cleanup after ensuring _on_finished() has completed"""
+        # Fix #1: Disconnect class-level signals to prevent reference leaks
+        # SECURITY FIX: Block signals during disconnection to prevent race condition
+        try:
+            # Block signals temporarily to prevent concurrent emit during disconnect
+            self.blockSignals(True)
+
+            # Try to disconnect all connections from these signals
+            try:
+                self.finished_signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                self.result_ready_signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        except Exception as e:
+            print(f"Warning: Signal disconnection error: {e}", file=sys.stderr)
+        finally:
+            try:
+                self.blockSignals(False)
+            except Exception:
+                pass
+
         # 确保在线程真正完成时清理所有资源
         self._cleanup_resources()
+
+        # Fix #6: Replace deleteLater() with mode-aware cleanup
+        from PySide6.QtWidgets import QApplication
+        has_qt_app = QApplication.instance() is not None
 
         # 清理对象引用
         if self._worker:
@@ -993,20 +1103,21 @@ class QThreadWithReturn(QObject):
                     self._worker._error_signal.disconnect()
                 except (RuntimeError, TypeError):
                     pass  # 信号可能已经断开或对象已被删除
-            
+
             # 清理worker的父级回调引用
             if hasattr(self._worker, '_parent_result_callback'):
                 self._worker._parent_result_callback = None
             if hasattr(self._worker, '_parent_error_callback'):
                 self._worker._parent_error_callback = None
-                
-            # 尝试删除对象
-            try:
-                self._worker.deleteLater()
-            except (RuntimeError, AttributeError):
-                pass  # 非Qt模式下可能没有deleteLater
+
+            # Mode-aware cleanup: only use deleteLater() in Qt mode
+            if has_qt_app:
+                try:
+                    self._worker.deleteLater()
+                except (RuntimeError, AttributeError):
+                    pass
             self._worker = None
-            
+
         if self._thread:
             # 只有当信号实际连接时才尝试断开
             if self._signals_connected:
@@ -1015,12 +1126,13 @@ class QThreadWithReturn(QObject):
                     self._thread.finished.disconnect()
                 except (RuntimeError, TypeError):
                     pass  # 信号可能已经断开或对象已被删除
-            
-            # 尝试删除对象
-            try:
-                self._thread.deleteLater()
-            except (RuntimeError, AttributeError):
-                pass  # 非Qt模式下可能没有deleteLater
+
+            # Mode-aware cleanup: only use deleteLater() in Qt mode
+            if has_qt_app:
+                try:
+                    self._thread.deleteLater()
+                except (RuntimeError, AttributeError):
+                    pass
             self._thread = None
 
     def _on_timeout(self) -> None:
@@ -1075,21 +1187,82 @@ class QThreadWithReturn(QObject):
             self._timeout_timer.deleteLater()
             self._timeout_timer = None
 
-    def _cleanup_resources(self) -> None:
-        """清理资源"""
-        self._cleanup_timeout_timer()
-
-        self._mutex.lock()
-        try:
-            if not self._is_finished:
-                self._is_finished = True
-            self._wait_condition.wakeAll()
-        finally:
-            self._mutex.unlock()
-            
-        # 清理回调函数引用，避免潜在的循环引用
+    def _clear_callbacks(self) -> None:
+        """Fix #2: Clear callback references to break circular refs"""
         self._done_callback = None
         self._failure_callback = None
+
+    def _cleanup_resources(self) -> None:
+        """清理资源 - SECURITY HARDENED: Thread-safe with re-entry protection"""
+        # CRITICAL SECURITY FIX: Prevent concurrent cleanup (deadlock/double-free)
+        if not hasattr(self, '_cleanup_lock'):
+            return  # Object being destroyed, skip cleanup
+
+        # Non-blocking check: if cleanup already in progress, skip
+        if not self._cleanup_lock.acquire(blocking=False):
+            return  # Another thread is cleaning up
+
+        try:
+            # Re-entry guard: check if cleanup already completed
+            if self._cleanup_in_progress:
+                return
+            self._cleanup_in_progress = True
+
+            self._cleanup_timeout_timer()
+
+            # CRITICAL SECURITY FIX: Hardened mutex handling with timeout and logging
+            mutex_locked = False
+            try:
+                if hasattr(self, '_mutex') and self._mutex is not None:
+                    try:
+                        # Try to lock with timeout to prevent deadlock
+                        mutex_locked = self._mutex.tryLock(100)  # 100ms timeout
+
+                        if mutex_locked:
+                            if not self._is_finished:
+                                self._is_finished = True
+                            if hasattr(self, '_wait_condition') and self._wait_condition is not None:
+                                self._wait_condition.wakeAll()
+                        else:
+                            # Failed to acquire mutex - log warning but continue cleanup
+                            print(f"Warning: Failed to acquire mutex during cleanup (possible deadlock avoided)",
+                                  file=sys.stderr)
+                    except Exception as e:
+                        # Mutex operation failed - log but continue
+                        print(f"Warning: Mutex operation failed during cleanup: {e}", file=sys.stderr)
+                    finally:
+                        if mutex_locked:
+                            try:
+                                self._mutex.unlock()
+                            except Exception as e:
+                                # CRITICAL: Unlock failed - this is serious
+                                print(f"CRITICAL: Mutex unlock failed: {e} - potential deadlock",
+                                      file=sys.stderr)
+            except Exception as e:
+                print(f"Error in mutex cleanup: {e}", file=sys.stderr)
+
+            # Fix #2: Clear callback function references to avoid circular references
+            # CRITICAL: Do NOT clear callbacks here during normal completion!
+            # Callbacks are captured in QTimer closures and clearing them serves no purpose.
+            # Only clear in early-cancel paths (lines 499, 524) where callbacks won't execute.
+            # self._clear_callbacks()  # ← DISABLED - breaks callback execution
+
+            # Fix #5: Explicitly delete Qt synchronization objects AFTER unlocking
+            # Don't delete immediately - let Python's garbage collector handle it
+            # This prevents issues when cleanup is called multiple times
+            try:
+                # Just clear the completion event, don't delete objects
+                if hasattr(self, '_completion_event') and self._completion_event is not None:
+                    self._completion_event.clear()
+            except Exception as e:
+                print(f"Warning: Failed to clear completion event: {e}", file=sys.stderr)
+
+        finally:
+            # Always release cleanup lock
+            try:
+                self._cleanup_lock.release()
+            except Exception:
+                pass  # Lock already released or object destroyed
 
     class _Worker(QObject):
         """内部工作类"""
