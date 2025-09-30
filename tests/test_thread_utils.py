@@ -433,21 +433,47 @@ def test_isolation():
     if app:
         # 清理事件队列
         app.processEvents()
-        
+
     # 让正在运行的线程有时间完成（减少等待时间）
     wait_with_events(10)
-    
+
     yield  # 执行测试
-    
+
     # 测试后清理
     if app:
         # 清理任何残留事件
         for _ in range(3):
             app.processEvents()
             time.sleep(0.001)
-    
+
     # 给线程时间完全清理（减少等待时间）
     wait_with_events(10)
+
+
+@pytest.fixture(autouse=True)
+def gradual_cleanup_between_tests():
+    """Ensure gradual cleanup between tests to prevent resource accumulation.
+
+    CRITICAL FIX: This prevents the SAME gc.collect() crash we fixed in
+    test_stress_and_concurrency.py and test_production_scenarios.py.
+
+    Without this fixture, running the FULL test suite causes:
+    - Process crash with exit code -1073740791 (0xC0000409) STATUS_STACK_BUFFER_OVERRUN
+    - Crash occurs at test_thread_really_finished_flag
+    - Root cause: Simultaneous Qt object deletion during aggressive gc.collect()
+
+    This fixture uses the same gradual cleanup pattern that successfully fixed
+    the other test files.
+    """
+    yield
+
+    # Allow Qt event loop to process deferred deletions
+    wait_with_events(300)  # 300ms for Qt cleanup
+
+    # Gradual garbage collection - only collect youngest generation
+    # to avoid stack overflow when collecting many Qt objects at once
+    import gc
+    gc.collect(generation=0)
 
 
 @pytest.fixture

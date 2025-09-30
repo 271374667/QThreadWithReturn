@@ -108,6 +108,9 @@ class QThreadPoolExecutor:
         self._initargs = initargs
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
+        # COUNTER LOCK FIX: Add dedicated lock for atomic counter operations
+        # This fixes the counter desynchronization bug when multiple tasks complete simultaneously
+        self._counter_lock = threading.Lock()
         self._active_futures: Set[QThreadWithReturn] = set()
         self._pending_tasks: list = []
         self._running_workers: int = 0
@@ -174,14 +177,26 @@ class QThreadPoolExecutor:
             return future
 
     def _try_start_tasks(self):
-        # STRESS TEST FIX: Simplified atomic counter management
-        # Problem: Using shutdown_lock inside completion handler causes deadlock
-        # Solution: Use simple counter operations without nested locking
-        while self._pending_tasks and self._running_workers < self._max_workers:
+        # COUNTER LOCK FIX: Check capacity atomically to prevent race conditions
+        while self._pending_tasks:
             # STRESS TEST FIX: Don't start new tasks during shutdown
             if self._shutdown:
                 break
 
+            # COUNTER LOCK FIX: Check worker capacity atomically
+            # Must check inside lock to prevent race with completion handler
+            can_start = False
+            with self._counter_lock:
+                if self._running_workers < self._max_workers:
+                    can_start = True
+                    # Pre-increment counter to reserve slot
+                    # This prevents race where multiple threads try to start tasks simultaneously
+                    self._running_workers += 1
+
+            if not can_start:
+                break  # Pool is full, stop trying
+
+            # Pop task AFTER we've reserved a slot
             future = self._pending_tasks.pop(0)
 
             # 使用弱引用连接避免循环引用
@@ -193,31 +208,35 @@ class QThreadPoolExecutor:
                     strong_self = weak_self()
                     if strong_self is not None:
                         try:
-                            # STRESS TEST FIX: Simpler counter management without nested locks
-                            # Decrement counter atomically
-                            strong_self._running_workers = max(0, strong_self._running_workers - 1)
-                            strong_self._active_futures.discard(fut)
+                            # COUNTER LOCK FIX: Use dedicated lock for atomic counter operations
+                            # This prevents race conditions when multiple tasks complete simultaneously
+                            with strong_self._counter_lock:
+                                strong_self._running_workers = max(0, strong_self._running_workers - 1)
+                                strong_self._active_futures.discard(fut)
 
-                            # Only start new tasks if not shutdown
+                            # Only start new tasks if not shutdown (outside lock to avoid deadlock)
                             if not strong_self._shutdown:
                                 strong_self._try_start_tasks()
                         except Exception as e:
-                            # STRESS TEST FIX: Emergency counter correction
+                            # COUNTER LOCK FIX: Emergency counter correction with lock protection
                             print(f"Warning: Error in task completion handler: {e}", file=sys.stderr)
                             try:
-                                strong_self._running_workers = max(0, strong_self._running_workers - 1)
+                                with strong_self._counter_lock:
+                                    strong_self._running_workers = max(0, strong_self._running_workers - 1)
                             except Exception:
                                 pass
                 return safe_on_finished
 
             try:
-                # Connect signal BEFORE starting thread and incrementing counter
+                # Connect signal
                 connection = future.finished_signal.connect(make_safe_on_finished(future))
                 future._pool_connection = connection
+                # COUNTER LOCK FIX: Mark as pool-managed to prevent cleanup from disconnecting
+                future._pool_managed = True
 
-                # Add to active set and increment counter
-                self._active_futures.add(future)
-                self._running_workers += 1
+                # Add to active set
+                with self._counter_lock:
+                    self._active_futures.add(future)
 
                 # Start thread LAST
                 future.start()
@@ -234,9 +253,10 @@ class QThreadPoolExecutor:
                         except (RuntimeError, TypeError):
                             pass
 
-                    # Rollback state
-                    self._active_futures.discard(future)
-                    self._running_workers = max(0, self._running_workers - 1)
+                    # COUNTER LOCK FIX: Rollback state with lock protection
+                    with self._counter_lock:
+                        self._active_futures.discard(future)
+                        self._running_workers = max(0, self._running_workers - 1)
 
                     # Re-add to pending (retry once)
                     self._pending_tasks.insert(0, future)
@@ -1048,7 +1068,7 @@ class QThreadWithReturn(QObject):
             self._wait_condition.wakeAll()
         finally:
             self._mutex.unlock()
-        
+
         # 设置完成事件（备用同步机制）
         self._completion_event.set()
 
@@ -1074,6 +1094,16 @@ class QThreadWithReturn(QObject):
                     self._execute_failure_callback_safely(callback, exception, callback_params)
             except Exception as e:
                 print(f"Error scheduling failure callback: {e}", file=sys.stderr)
+
+        # COUNTER LOCK FIX: Emit finished_signal for failed tasks too
+        # Pool completion handler needs to be called regardless of success/failure
+        self.finished_signal.emit()
+
+        # Process events to ensure signal delivery
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
 
     def _execute_failure_callback(self, exception: Exception) -> None:
         """在主线程中执行失败回调"""
@@ -1132,21 +1162,33 @@ class QThreadWithReturn(QObject):
 
     def _perform_delayed_cleanup(self) -> None:
         """Execute cleanup after ensuring _on_finished() has completed"""
+        # COUNTER LOCK FIX: Don't disconnect pool connection
+        # The pool manages its own connection lifecycle, and disconnecting it here
+        # prevents the pool's completion handler from being called
+
         # Fix #1: Disconnect class-level signals to prevent reference leaks
         # SECURITY FIX: Block signals during disconnection to prevent race condition
         try:
-            # Block signals temporarily to prevent concurrent emit during disconnect
-            self.blockSignals(True)
+            # COUNTER LOCK FIX: Skip disconnection if this is a pool-managed thread
+            # Pool threads have _pool_managed flag and the pool will disconnect them
+            if hasattr(self, '_pool_managed') and self._pool_managed:
+                # This is a pool-managed thread, let the pool handle disconnection
+                # Just clean up other resources
+                pass
+            else:
+                # Not a pool thread, safe to disconnect all signals
+                # Block signals temporarily to prevent concurrent emit during disconnect
+                self.blockSignals(True)
 
-            # Try to disconnect all connections from these signals
-            try:
-                self.finished_signal.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            try:
-                self.result_ready_signal.disconnect()
-            except (RuntimeError, TypeError):
-                pass
+                # Try to disconnect all connections from these signals
+                try:
+                    self.finished_signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                try:
+                    self.result_ready_signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
         except Exception as e:
             print(f"Warning: Signal disconnection error: {e}", file=sys.stderr)
         finally:
