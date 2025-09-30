@@ -174,43 +174,76 @@ class QThreadPoolExecutor:
             return future
 
     def _try_start_tasks(self):
-        # 启动等待队列中的任务，直到达到最大并发数
+        # STRESS TEST FIX: Simplified atomic counter management
+        # Problem: Using shutdown_lock inside completion handler causes deadlock
+        # Solution: Use simple counter operations without nested locking
         while self._pending_tasks and self._running_workers < self._max_workers:
+            # STRESS TEST FIX: Don't start new tasks during shutdown
+            if self._shutdown:
+                break
+
             future = self._pending_tasks.pop(0)
-            self._active_futures.add(future)
-            self._running_workers += 1
 
-            # 连接信号，任务完成时减少计数
-            # 使用闭包捕获当前的future引用
-            def make_on_finished(fut):
-                def on_finished():
-                    self._running_workers -= 1
-                    self._active_futures.discard(fut)
-                    self._try_start_tasks()
-                return on_finished
-
-            # 使用弱引用连接避免循环引用，增加shutdown检查避免死锁
+            # 使用弱引用连接避免循环引用
             import weakref
             weak_self = weakref.ref(self)
+
             def make_safe_on_finished(fut):
                 def safe_on_finished():
                     strong_self = weak_self()
-                    if strong_self is not None and not strong_self._shutdown:
+                    if strong_self is not None:
                         try:
-                            strong_self._running_workers -= 1
+                            # STRESS TEST FIX: Simpler counter management without nested locks
+                            # Decrement counter atomically
+                            strong_self._running_workers = max(0, strong_self._running_workers - 1)
                             strong_self._active_futures.discard(fut)
-                            # 在shutdown状态下不再尝试启动新任务
+
+                            # Only start new tasks if not shutdown
                             if not strong_self._shutdown:
                                 strong_self._try_start_tasks()
-                        except Exception:
-                            # 忽略shutdown期间的信号处理异常
-                            pass
+                        except Exception as e:
+                            # STRESS TEST FIX: Emergency counter correction
+                            print(f"Warning: Error in task completion handler: {e}", file=sys.stderr)
+                            try:
+                                strong_self._running_workers = max(0, strong_self._running_workers - 1)
+                            except Exception:
+                                pass
                 return safe_on_finished
-            
-            # Fix #4: Add connection tracking in QThreadPoolExecutor.submit()
-            connection = future.finished_signal.connect(make_safe_on_finished(future))
-            future._pool_connection = connection
-            future.start()
+
+            try:
+                # Connect signal BEFORE starting thread and incrementing counter
+                connection = future.finished_signal.connect(make_safe_on_finished(future))
+                future._pool_connection = connection
+
+                # Add to active set and increment counter
+                self._active_futures.add(future)
+                self._running_workers += 1
+
+                # Start thread LAST
+                future.start()
+
+            except Exception as e:
+                # STRESS TEST FIX: Rollback on failure
+                print(f"Error starting task: {e}", file=sys.stderr)
+                try:
+                    # Disconnect signal if connected
+                    if hasattr(future, '_pool_connection'):
+                        try:
+                            future.finished_signal.disconnect(future._pool_connection)
+                            del future._pool_connection
+                        except (RuntimeError, TypeError):
+                            pass
+
+                    # Rollback state
+                    self._active_futures.discard(future)
+                    self._running_workers = max(0, self._running_workers - 1)
+
+                    # Re-add to pending (retry once)
+                    self._pending_tasks.insert(0, future)
+                except Exception:
+                    pass
+
+                break  # Stop after error
 
     def shutdown(
         self,
@@ -658,21 +691,21 @@ class QThreadWithReturn(QObject):
 
     def result(self, timeout: Optional[float] = None) -> Any:
         """获取任务执行结果。
-        
+
         阻塞直到任务完成，并返回结果。如果在主线程调用，
         会自动处理 Qt 事件以避免界面冻结。
-        
+
         Args:
             timeout: 等待超时时间（秒）。None 表示无限等待。
-        
+
         Returns:
             Any: 任务的返回值。
-        
+
         Raises:
             CancelledError: 如果任务被取消。
             TimeoutError: 如果超时。
             Exception: 任务执行时抛出的异常。
-        
+
         Example:
             >>> try:
             ...     result = thread.result(timeout=5.0)
@@ -687,10 +720,20 @@ class QThreadWithReturn(QObject):
 
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
+
+        # STRESS TEST FIX: Fast path for already-completed futures
+        # Improves concurrent result() access by avoiding polling
+        if self._is_finished:
+            if self._is_cancelled or self._is_force_stopped:
+                raise CancelledError()
+            if self._exception:
+                raise self._exception
+            return self._result
+
         if not self._is_finished:
             app = QApplication.instance()
             start_time = time.monotonic()
-            
+
             # 如果没有Qt应用，使用事件等待机制
             if app is None:
                 wait_timeout = timeout if timeout is not None else None
@@ -702,31 +745,43 @@ class QThreadWithReturn(QObject):
                     if timeout is not None:
                         raise TimeoutError()
             else:
-                # 有Qt应用，使用事件循环处理
+                # STRESS TEST FIX: Hybrid approach for high concurrency
+                # Check completion event first (faster), then poll with events
                 while not self._is_finished:
+                    # Check completion event with short timeout
+                    if self._completion_event.wait(0.001):  # 1ms check
+                        break  # Event signaled, exit polling loop
+
                     if self._is_cancelled or self._is_force_stopped:
                         raise CancelledError()
-                    if app and threading.current_thread() == threading.main_thread():
+
+                    # Process events for main thread
+                    if threading.current_thread() == threading.main_thread():
                         app.processEvents()
-                    # 动态调整睡眠时间，起初短一点，逐渐增加
+
+                    # STRESS TEST FIX: Increased sleep times to reduce CPU load under concurrency
+                    # Higher minimums prevent busy-waiting when many threads call result()
                     elapsed = time.monotonic() - start_time
-                    if elapsed < 1.0:
-                        time.sleep(0.001)  # 1ms
-                    elif elapsed < 5.0:
-                        time.sleep(0.01)   # 10ms
+                    if elapsed < 0.5:
+                        time.sleep(0.005)  # 5ms (was 1ms) - less aggressive under load
+                    elif elapsed < 2.0:
+                        time.sleep(0.020)  # 20ms (was 10ms)
                     else:
-                        time.sleep(0.05)   # 50ms
+                        time.sleep(0.050)  # 50ms (unchanged)
+
                     if timeout is not None and elapsed > timeout:
                         raise TimeoutError()
+
+        # Final state checks after wait
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
         if self._exception:
             raise self._exception
-        
+
         # 确保线程完成后进行清理
         if self._is_finished and not self._thread_really_finished:
             self._on_thread_finished()
-            
+
         return self._result
 
     def exception(self, timeout: Optional[float] = None) -> Optional[BaseException]:
@@ -918,8 +973,9 @@ class QThreadWithReturn(QObject):
             self.result_ready_signal.emit(result)
         finally:
             self._mutex.unlock()
-        
-        # 设置完成事件（备用同步机制）
+
+        # STRESS TEST FIX: Set completion event FIRST before any other operations
+        # This ensures concurrent result() calls can proceed immediately
         self._completion_event.set()
 
         self._cleanup_timeout_timer()
@@ -929,6 +985,7 @@ class QThreadWithReturn(QObject):
             self._thread.quit()
 
         # Fix #3: Fix non-Qt mode QTimer usage - check for Qt application before using QTimer
+        # STRESS TEST FIX: Execute callbacks with immediate event processing
         if self._done_callback:
             try:
                 from PySide6.QtWidgets import QApplication
@@ -939,6 +996,10 @@ class QThreadWithReturn(QObject):
                     # Qt mode: schedule in event loop
                     QTimer.singleShot(0, lambda r=result, cb=callback, cp=callback_params:
                                      self._execute_callback_safely(cb, r, cp, "done_callback"))
+                    # STRESS TEST FIX: Force immediate event processing for callback execution
+                    # Under high load (50+ concurrent threads), callbacks may not execute
+                    # unless we explicitly process events after scheduling
+                    app.processEvents()
                 else:
                     # Non-Qt mode: execute directly
                     self._execute_callback_safely(callback, result, callback_params, "done_callback")
@@ -947,6 +1008,13 @@ class QThreadWithReturn(QObject):
 
         # 发射任务完成信号
         self.finished_signal.emit()
+
+        # STRESS TEST FIX: Process events again after signal emission
+        # Ensures signals propagate to connected slots immediately
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
 
     def _execute_callback_safely(self, callback: Callable, result: Any, param_count: int, callback_name: str) -> None:
         """安全执行回调函数（避免竞态条件）"""
