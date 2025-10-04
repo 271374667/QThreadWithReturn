@@ -46,6 +46,7 @@ def wait_with_events(ms):
 # TestMemoryLeakPrevention: Validate 9 fixed leaks remain fixed
 # ============================================================================
 
+
 class TestMemoryLeakPrevention:
     """Test that fixed memory leaks don't regress"""
 
@@ -54,6 +55,7 @@ class TestMemoryLeakPrevention:
         Validates Fix #1: Signal reference retention
         Signals must be disconnected after thread completion
         """
+
         def task():
             return "done"
 
@@ -153,6 +155,7 @@ class TestMemoryLeakPrevention:
         Validates Fix #5: Qt synchronization objects cleanup
         QMutex and QWaitCondition must be deleted
         """
+
         def task():
             return "done"
 
@@ -175,6 +178,7 @@ class TestMemoryLeakPrevention:
         Validates Fix #4: Thread pool signal connections
         _pool_connection must be disconnected and deleted
         """
+
         def task(n):
             return n * 2
 
@@ -237,6 +241,7 @@ class TestMemoryLeakPrevention:
         """
         Validates Fix #8: Force-stop path leaks
         """
+
         def long_task():
             time.sleep(5.0)
             return "done"
@@ -262,6 +267,7 @@ class TestMemoryLeakPrevention:
         """
         Validates Fix #9: Timeout path leaks
         """
+
         def long_task():
             time.sleep(5.0)
             return "done"
@@ -290,6 +296,7 @@ class TestMemoryLeakPrevention:
 # TestMemoryGrowthValidation: Measure actual memory growth
 # ============================================================================
 
+
 class TestMemoryGrowthValidation:
     """Test for actual memory growth using tracemalloc"""
 
@@ -301,6 +308,7 @@ class TestMemoryGrowthValidation:
         COUNTER LOCK FIX: Reduced from 1000 to 500 cycles to prevent timeout
         Still sufficient to detect memory leaks while completing in <60s
         """
+
         def task(n):
             return n * 2
 
@@ -332,20 +340,23 @@ class TestMemoryGrowthValidation:
         tracemalloc.stop()
 
         # Compare memory
-        top_stats = current.compare_to(baseline, 'lineno')
+        top_stats = current.compare_to(baseline, "lineno")
 
         # Calculate total memory growth
         total_growth = sum(stat.size_diff for stat in top_stats)
 
         # Memory growth should be minimal (< 5MB = 5_000_000 bytes)
         # Allow 10MB for safety margin in test environment
-        assert total_growth < 10_000_000, f"Memory grew by {total_growth / 1_000_000:.2f}MB"
+        assert total_growth < 10_000_000, (
+            f"Memory grew by {total_growth / 1_000_000:.2f}MB"
+        )
 
     def test_memory_growth_pool_100_cycles(self, qapp):
         """
         Measure memory growth for thread pool operations
         Should show minimal growth
         """
+
         def task(n):
             return n
 
@@ -375,16 +386,19 @@ class TestMemoryGrowthValidation:
         tracemalloc.stop()
 
         # Compare memory
-        top_stats = current.compare_to(baseline, 'lineno')
+        top_stats = current.compare_to(baseline, "lineno")
         total_growth = sum(stat.size_diff for stat in top_stats)
 
         # Pool operations should not leak significantly
-        assert total_growth < 5_000_000, f"Memory grew by {total_growth / 1_000_000:.2f}MB"
+        assert total_growth < 5_000_000, (
+            f"Memory grew by {total_growth / 1_000_000:.2f}MB"
+        )
 
 
 # ============================================================================
 # TestResourceCleanup: Validate proper resource cleanup
 # ============================================================================
+
 
 class TestResourceCleanup:
     """Test proper cleanup of resources in various scenarios"""
@@ -468,6 +482,7 @@ class TestResourceCleanup:
 
     def test_signal_disconnection_on_cleanup(self, qapp):
         """Validate signals are disconnected during cleanup"""
+
         def task():
             return "done"
 
@@ -509,11 +524,13 @@ class TestResourceCleanup:
 # TestWeakReferenceValidation: Validate garbage collection
 # ============================================================================
 
+
 class TestWeakReferenceValidation:
     """Test garbage collection using weak references"""
 
     def test_thread_objects_are_collectable(self, qapp):
         """Validate thread objects can be garbage collected"""
+
         def task():
             return "done"
 
@@ -536,6 +553,7 @@ class TestWeakReferenceValidation:
 
     def test_worker_objects_are_collectable(self, qapp):
         """Validate worker objects exist and are properly managed by QThread"""
+
         def task():
             return "done"
 
@@ -549,7 +567,7 @@ class TestWeakReferenceValidation:
 
             thread.start()
             # Worker is created after start()
-            if hasattr(thread, '_worker') and thread._worker is not None:
+            if hasattr(thread, "_worker") and thread._worker is not None:
                 worker_refs.append(weakref.ref(thread._worker))
             thread.result(timeout=1.0)
 
@@ -570,10 +588,13 @@ class TestWeakReferenceValidation:
         # The important thing is that threads themselves can be collected
         collected_threads = sum(1 for ref in thread_refs if ref() is None)
         # At least some threads should be collected
-        assert collected_threads >= 10, f"Threads should be collectable, got {collected_threads} collected"
+        assert collected_threads >= 10, (
+            f"Threads should be collectable, got {collected_threads} collected"
+        )
 
     def test_future_objects_are_collectable_after_pool_shutdown(self, qapp):
         """Validate future objects are collectable after pool shutdown"""
+
         def task(n):
             return n
 
@@ -598,6 +619,7 @@ class TestWeakReferenceValidation:
 # ============================================================================
 # TestCallbackMemoryManagement: Callback-specific memory tests
 # ============================================================================
+
 
 class TestCallbackMemoryManagement:
     """Test memory management for callbacks"""

@@ -43,6 +43,7 @@ def wait_with_events(ms):
 # TestProductionWorkflows: Real-world usage patterns
 # ============================================================================
 
+
 class TestProductionWorkflows:
     """Test common production usage patterns and workflows"""
 
@@ -74,6 +75,7 @@ class TestProductionWorkflows:
 
     def test_batch_processing_with_error_recovery(self, qapp):
         """Test batch processing where some tasks fail but processing continues"""
+
         def process_item(item):
             if item == "error":
                 raise ValueError(f"Failed to process {item}")
@@ -95,7 +97,7 @@ class TestProductionWorkflows:
 
         # Verify successful items processed and errors captured
         assert len(results) == 4  # 4 successful items
-        assert len(errors) == 2   # 2 error items
+        assert len(errors) == 2  # 2 error items
         assert "processed_item1" in results
         assert "processed_item4" in results
 
@@ -134,6 +136,7 @@ class TestProductionWorkflows:
 
     def test_graceful_degradation_on_task_failure(self, qapp):
         """Test system continues working after task failures"""
+
         def failing_task():
             raise RuntimeError("Task failed")
 
@@ -156,6 +159,7 @@ class TestProductionWorkflows:
 
     def test_sequential_dependent_tasks(self, qapp):
         """Test tasks that depend on results of previous tasks"""
+
         def task1():
             return {"step": 1, "data": "initial"}
 
@@ -183,6 +187,7 @@ class TestProductionWorkflows:
 
     def test_task_cancellation_in_workflow(self, qapp):
         """Test cancelling tasks mid-workflow without breaking subsequent tasks"""
+
         def cancellable_task():
             time.sleep(2.0)  # Long enough to cancel
             return "should_not_complete"
@@ -211,11 +216,13 @@ class TestProductionWorkflows:
 # TestThreadPoolSaturation: Resource limit handling
 # ============================================================================
 
+
 class TestThreadPoolSaturation:
     """Test thread pool behavior under resource constraints"""
 
     def test_more_tasks_than_workers_queuing(self, qapp):
         """Test submitting more tasks than max_workers - should queue properly"""
+
         def task(n):
             time.sleep(0.1)
             return n * 2
@@ -236,6 +243,7 @@ class TestThreadPoolSaturation:
 
         def task():
             import threading
+
             executed_in.append(threading.current_thread().ident)
             time.sleep(0.05)
             return "done"
@@ -252,6 +260,7 @@ class TestThreadPoolSaturation:
 
     def test_pool_saturation_with_timeout(self, qapp):
         """Test behavior when pool is saturated and tasks timeout"""
+
         def long_task():
             time.sleep(5.0)
             return "done"
@@ -273,6 +282,7 @@ class TestThreadPoolSaturation:
 
     def test_initializer_exception_handling(self, qapp):
         """Test pool behavior when initializer raises exception"""
+
         def bad_initializer():
             raise RuntimeError("Initializer failed")
 
@@ -289,6 +299,7 @@ class TestThreadPoolSaturation:
 
     def test_rapid_submit_cancel_cycles(self, qapp):
         """Test rapid submit/cancel cycles don't cause resource leaks"""
+
         def task():
             time.sleep(0.5)
             return "done"
@@ -306,6 +317,7 @@ class TestThreadPoolSaturation:
 # ============================================================================
 # TestConcurrentOperations: Race condition validation
 # ============================================================================
+
 
 class TestConcurrentOperations:
     """Test concurrent access patterns and race conditions"""
@@ -377,7 +389,9 @@ class TestConcurrentOperations:
         assert len(results) == 5
         # All should succeed since thread already completed
         successful = [r for r in results if r[0] == "success"]
-        assert len(successful) >= 4, f"Got results: {results}"  # Allow 1 failure for edge cases
+        assert len(successful) >= 4, (
+            f"Got results: {results}"
+        )  # Allow 1 failure for edge cases
 
     def test_concurrent_pool_shutdown(self, qapp):
         """Test concurrent shutdown calls don't cause crashes"""
@@ -422,14 +436,14 @@ class TestConcurrentOperations:
 
         def worker_thread():
             for _ in range(10):
-                op = random.choice(['submit', 'cancel', 'result'])
+                op = random.choice(["submit", "cancel", "result"])
 
-                if op == 'submit':
+                if op == "submit":
                     future = pool.submit(task, random.randint(1, 100))
                     with lock:
                         futures.append(future)
 
-                elif op == 'cancel' and futures:
+                elif op == "cancel" and futures:
                     with lock:
                         if futures:
                             future = random.choice(futures)
@@ -438,7 +452,7 @@ class TestConcurrentOperations:
                     except Exception:
                         pass
 
-                elif op == 'result' and futures:
+                elif op == "result" and futures:
                     with lock:
                         if futures:
                             future = random.choice(futures)
@@ -466,6 +480,7 @@ class TestConcurrentOperations:
 # TestCallbackResilience: Error handling and recovery
 # ============================================================================
 
+
 class TestCallbackResilience:
     """Test callback error handling and system resilience"""
 
@@ -481,6 +496,7 @@ class TestCallbackResilience:
 
         # Install exception handler
         import sys
+
         original_excepthook = sys.excepthook
 
         def exception_handler(exc_type, exc_value, exc_traceback):
@@ -544,6 +560,7 @@ class TestCallbackResilience:
 
     def test_failure_callback_with_exception_in_callback(self, qapp):
         """Test failure callback that itself raises exception"""
+
         def failing_task():
             raise ValueError("Task failed")
 
@@ -571,6 +588,7 @@ class TestCallbackResilience:
 # TestCleanupScenarios: Resource management validation
 # ============================================================================
 
+
 class TestCleanupScenarios:
     """Test proper resource cleanup in various scenarios"""
 
@@ -582,6 +600,7 @@ class TestCleanupScenarios:
         wait_with_events(300)
         # Gradual garbage collection to avoid stack overflow
         import gc
+
         gc.collect(generation=0)  # Only collect youngest generation
 
     def test_cleanup_on_normal_completion(self, qapp):
@@ -614,6 +633,7 @@ class TestCleanupScenarios:
 
     def test_cleanup_on_cancellation(self, qapp):
         """Verify resources are cleaned up after cancellation"""
+
         def long_task():
             time.sleep(5.0)
             return "done"
@@ -632,6 +652,7 @@ class TestCleanupScenarios:
 
     def test_cleanup_on_exception(self, qapp):
         """Verify resources are cleaned up after exception"""
+
         def failing_task():
             raise RuntimeError("Task failed")
 
@@ -671,6 +692,7 @@ class TestCleanupScenarios:
 
     def test_pool_cleanup_with_pending_tasks(self, qapp):
         """Test pool cleanup when tasks are still pending"""
+
         def task():
             time.sleep(0.5)
             return "done"
@@ -693,6 +715,7 @@ class TestCleanupScenarios:
 # TestEdgeCasesAndCornerCases: Unusual scenarios
 # ============================================================================
 
+
 class TestEdgeCasesAndCornerCases:
     """Test unusual edge cases and corner scenarios"""
 
@@ -705,6 +728,7 @@ class TestEdgeCasesAndCornerCases:
 
     def test_task_returning_none(self, qapp):
         """Test task that explicitly returns None"""
+
         def task():
             return None
 
@@ -751,6 +775,7 @@ class TestEdgeCasesAndCornerCases:
 
     def test_very_quick_task_completion(self, qapp):
         """Test task that completes before result() is called"""
+
         def instant_task():
             return "instant"
 
@@ -764,6 +789,7 @@ class TestEdgeCasesAndCornerCases:
 
     def test_multiple_result_calls_same_thread(self, qapp):
         """Test calling result() multiple times on same thread"""
+
         def task():
             return "result"
 

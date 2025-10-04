@@ -44,6 +44,7 @@ def gradual_cleanup_between_tests(qapp):
     # Gradual garbage collection - only collect youngest generation
     # to avoid stack overflow when collecting many Qt objects at once
     import gc
+
     gc.collect(generation=0)
 
 
@@ -64,11 +65,13 @@ def wait_with_events(ms):
 # TestHighVolumeOperations: Large-scale operation validation
 # ============================================================================
 
+
 class TestHighVolumeOperations:
     """Test system behavior under high-volume operations"""
 
     def test_sequential_thread_creation_500_cycles(self, qapp):
         """Test 500 sequential thread create/execute/cleanup cycles"""
+
         def task(n):
             return n * 2
 
@@ -88,6 +91,7 @@ class TestHighVolumeOperations:
 
     def test_concurrent_100_threads(self, qapp):
         """Test 100 threads executing simultaneously"""
+
         def task(n):
             time.sleep(0.05)
             return n * 2
@@ -111,6 +115,7 @@ class TestHighVolumeOperations:
 
     def test_thread_pool_1000_tasks_4_workers(self, qapp):
         """Test thread pool with 1000 tasks and only 4 workers"""
+
         def task(n):
             time.sleep(0.01)  # 10ms per task
             return n
@@ -132,6 +137,7 @@ class TestHighVolumeOperations:
 
     def test_rapid_submit_cancel_60_seconds(self, qapp):
         """Test rapid submit/cancel cycles for 60 seconds (stress test)"""
+
         def task():
             time.sleep(0.5)
             return "done"
@@ -187,11 +193,13 @@ class TestHighVolumeOperations:
 # TestConcurrencyRaceConditions: Race condition stress testing
 # ============================================================================
 
+
 class TestConcurrencyRaceConditions:
     """Test concurrent operations for race conditions"""
 
     def test_10_threads_concurrent_cancel_same_future(self, qapp):
         """Test 10 threads all trying to cancel same future"""
+
         def long_task():
             time.sleep(2.0)
             return "done"
@@ -220,6 +228,7 @@ class TestConcurrencyRaceConditions:
 
     def test_10_threads_concurrent_result_same_future(self, qapp):
         """Test 10 threads all trying to get result from same future"""
+
         def task():
             time.sleep(0.1)
             return "shared_result"
@@ -272,14 +281,14 @@ class TestConcurrencyRaceConditions:
         def worker():
             for _ in range(50):
                 # Random operation
-                op = random.choice(['submit', 'cancel', 'result'])
+                op = random.choice(["submit", "cancel", "result"])
 
-                if op == 'submit':
+                if op == "submit":
                     future = pool.submit(task, random.randint(1, 100))
                     with lock:
                         futures.append(future)
 
-                elif op == 'cancel':
+                elif op == "cancel":
                     with lock:
                         if futures:
                             future = random.choice(futures)
@@ -288,7 +297,7 @@ class TestConcurrencyRaceConditions:
                     except Exception:
                         pass
 
-                elif op == 'result':
+                elif op == "result":
                     with lock:
                         if futures:
                             future = random.choice(futures)
@@ -310,6 +319,7 @@ class TestConcurrencyRaceConditions:
 
     def test_signal_emission_during_concurrent_disconnection(self, qapp):
         """Test signal emission while multiple threads try to disconnect"""
+
         def task():
             return "result"
 
@@ -338,6 +348,7 @@ class TestConcurrencyRaceConditions:
 
     def test_concurrent_done_and_cancelled_checks(self, qapp):
         """Test concurrent status checks while thread is completing"""
+
         def task():
             # STRESS TEST FIX: Increased from 0.1s to give more completion time
             time.sleep(0.15)
@@ -396,6 +407,7 @@ class TestConcurrencyRaceConditions:
 # TestResourceExhaustion: Resource limit validation
 # ============================================================================
 
+
 class TestResourceExhaustion:
     """Test system behavior at resource limits"""
 
@@ -430,6 +442,7 @@ class TestResourceExhaustion:
 
     def test_large_result_objects(self, qapp):
         """Test threads returning large result objects"""
+
         def task():
             # Return 10MB of data
             return "x" * (10 * 1024 * 1024)
@@ -451,6 +464,7 @@ class TestResourceExhaustion:
 
     def test_very_long_running_task_with_cancellation(self, qapp):
         """Test cancelling very long-running tasks (simulated)"""
+
         def long_task():
             # Simulate 60 second task that checks for cancellation
             for _ in range(600):
@@ -474,6 +488,7 @@ class TestResourceExhaustion:
 
     def test_pool_task_queue_size_under_saturation(self, qapp):
         """Test pool handles large task queues"""
+
         def task(n):
             time.sleep(0.01)
             return n
@@ -503,11 +518,13 @@ class TestResourceExhaustion:
 # TestTimingAndPrecision: Timing validation under load
 # ============================================================================
 
+
 class TestTimingAndPrecision:
     """Test timing precision and consistency under load"""
 
     def test_timeout_precision_under_load(self, qapp):
         """Test timeout precision when system is loaded"""
+
         def task():
             time.sleep(0.5)
             return "done"
@@ -620,11 +637,13 @@ class TestTimingAndPrecision:
 # TestErrorRecoveryUnderStress: Error handling under stress
 # ============================================================================
 
+
 class TestErrorRecoveryUnderStress:
     """Test error recovery when system is under stress"""
 
     def test_exception_handling_with_50_concurrent_failures(self, qapp):
         """Test system handles many concurrent exceptions"""
+
         def failing_task(n):
             time.sleep(0.02)
             raise ValueError(f"Task {n} failed")
@@ -666,6 +685,7 @@ class TestErrorRecoveryUnderStress:
         - All failures are properly handled
         - Pool can still execute new tasks after recovery
         """
+
         def failing_task():
             # STRESS TEST FIX: Reduced from 0.1s - fail faster to reduce test time
             time.sleep(0.05)
@@ -738,7 +758,9 @@ class TestErrorRecoveryUnderStress:
             # Instead of waiting for each future in order, process as they complete
             for future in QThreadPoolExecutor.as_completed(futures, timeout=30.0):
                 try:
-                    result = future.result(timeout=0.1)  # Already completed via as_completed
+                    result = future.result(
+                        timeout=0.1
+                    )  # Already completed via as_completed
                     successes.append(result)
                 except Exception:
                     failures.append(True)
@@ -746,5 +768,5 @@ class TestErrorRecoveryUnderStress:
         # STRESS TEST FIX: Adjusted assertions for 50 tasks instead of 100
         # Should have both successes and failures
         assert len(successes) > 25  # Was >50, now >25 (more than half)
-        assert len(failures) > 10   # Was >20, now >10 (roughly 1/3)
+        assert len(failures) > 10  # Was >20, now >10 (roughly 1/3)
         assert len(successes) + len(failures) == 50  # Was 100, now 50

@@ -13,17 +13,18 @@ from PySide6.QtWidgets import QApplication
 # 导入我们要测试的类
 from qthreadwithreturn import QThreadWithReturn
 
+
 # 测试隔离和资源清理装饰器
 def cleanup_threads_and_pools(func):
     """测试装饰器，完全禁用清理避免系统崩溃"""
     import functools
-    
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # 直接执行测试，不进行任何清理操作
         # 清理操作可能导致Qt信号递归和栈溢出
         return func(*args, **kwargs)
-    
+
     return wrapper
 
 
@@ -44,8 +45,6 @@ class TestQThreadPoolExecutor:
                 future.result()
             assert future.done()
             assert not future.running()
-
-
 
     def test_shutdown_wait_and_cancel(self, qapp, slow_function):
         """测试 shutdown 的 wait/cancel_futures/force_stop"""
@@ -119,7 +118,6 @@ class TestQThreadPoolExecutor:
             if not pool._shutdown:
                 pool.shutdown()
 
-
     @cleanup_threads_and_pools
     def test_multiple_shutdown_calls(self, qapp, simple_function):
         """多次 shutdown 不抛异常"""
@@ -147,7 +145,6 @@ class TestQThreadPoolExecutor:
             # 确保清理
             if not pool._shutdown:
                 pool.shutdown(force_stop=True)
-
 
     def test_max_workers_limit(self, qapp):
         """测试线程池最大并发数限制，确保不会超出max_workers"""
@@ -275,135 +272,138 @@ class TestQThreadPoolExecutor:
             # 确保清理
             if not pool._shutdown:
                 pool.shutdown()
-    
+
     def test_pool_with_no_param_callback(self, qapp):
         """测试线程池支持无参数回调"""
         result_container = {"called": False, "count": 0}
-        
+
         def no_param_callback():
             """无参数回调函数"""
             result_container["called"] = True
             result_container["count"] += 1
-        
+
         def task():
             time.sleep(0.1)
             return "pool_result"
-        
+
         with QThreadPoolExecutor(max_workers=2) as pool:
             future = pool.submit(task)
             future.add_done_callback(no_param_callback)
-            
+
             result = future.result()
             assert result == "pool_result"
-            
+
             # 处理Qt事件以确保回调被执行
             wait_with_events(200)
-            
+
             assert result_container["called"], "无参数回调应该被调用"
             assert result_container["count"] == 1, "回调应该只被调用一次"
-    
+
     def test_pool_with_multiple_return_values(self, qapp):
         """测试线程池支持多返回值解包"""
         result_container = {"values": None}
-        
+
         def multi_param_callback(a, b, c):
             """多参数回调函数"""
             result_container["values"] = (a, b, c)
-        
+
         def task_with_multiple_returns():
             time.sleep(0.1)
             return (10, 20, 30)
-        
+
         with QThreadPoolExecutor(max_workers=2) as pool:
             future = pool.submit(task_with_multiple_returns)
             future.add_done_callback(multi_param_callback)
-            
+
             result = future.result()
             assert result == (10, 20, 30)
-            
+
             # 处理Qt事件以确保回调被执行
             wait_with_events(200)
-            
-            assert result_container["values"] == (10, 20, 30), "多参数回调应该接收到解包的值"
-    
-    
+
+            assert result_container["values"] == (10, 20, 30), (
+                "多参数回调应该接收到解包的值"
+            )
+
     def test_pool_class_method_callbacks(self, qapp):
         """测试线程池支持类方法作为回调"""
+
         class CallbackHandler:
             def __init__(self):
                 self.results = []
                 self.no_param_count = 0
-            
+
             def handle_result(self, value):
                 """带参数的类方法回调"""
                 self.results.append(value)
-            
+
             def handle_no_param(self):
                 """无参数的类方法回调（只有self）"""
                 self.no_param_count += 1
-        
+
         handler = CallbackHandler()
-        
+
         def task(x):
             time.sleep(0.05)
             return f"task_{x}"
-        
+
         with QThreadPoolExecutor(max_workers=2) as pool:
             fut1 = pool.submit(task, 1)
             fut1.add_done_callback(handler.handle_result)
-            
+
             fut2 = pool.submit(task, 2)
             fut2.add_done_callback(handler.handle_no_param)
-            
+
             fut1.result()
             fut2.result()
-            
+
             # 处理Qt事件以确保回调被执行
             wait_with_events(200)
-            
+
             assert "task_1" in handler.results, "类方法回调应该接收到值"
             assert handler.no_param_count == 1, "无参数类方法回调应该被调用"
-    
+
     def test_pool_failure_callbacks_with_flexible_params(self, qapp):
         """测试线程池失败回调的灵活参数支持"""
         error_container = {"called": False, "exception": None}
         no_param_container = {"called": False}
-        
+
         def error_callback(exc):
             """带参数的失败回调"""
             error_container["called"] = True
             error_container["exception"] = exc
-        
+
         def no_param_error_callback():
             """无参数的失败回调"""
             no_param_container["called"] = True
-        
+
         def failing_task():
             time.sleep(0.05)
             raise ValueError("Pool task error")
-        
+
         with QThreadPoolExecutor(max_workers=2) as pool:
             # 测试带参数的失败回调
             fut1 = pool.submit(failing_task)
             fut1.add_failure_callback(error_callback)
-            
+
             with pytest.raises(ValueError):
                 fut1.result()
             wait_with_events(200)
-            
+
             assert error_container["called"], "失败回调应该被调用"
-            assert isinstance(error_container["exception"], ValueError), "应该接收到异常对象"
-            
+            assert isinstance(error_container["exception"], ValueError), (
+                "应该接收到异常对象"
+            )
+
             # 测试无参数的失败回调
             fut2 = pool.submit(failing_task)
             fut2.add_failure_callback(no_param_error_callback)
-            
+
             with pytest.raises(ValueError):
                 fut2.result()
             wait_with_events(200)
-            
-            assert no_param_container["called"], "无参数失败回调应该被调用"
 
+            assert no_param_container["called"], "无参数失败回调应该被调用"
 
     def test_as_completed_timeout(self, qapp, slow_function):
         """测试as_completed的超时"""
@@ -473,6 +473,7 @@ def gradual_cleanup_between_tests():
     # Gradual garbage collection - only collect youngest generation
     # to avoid stack overflow when collecting many Qt objects at once
     import gc
+
     gc.collect(generation=0)
 
 
@@ -755,7 +756,9 @@ class TestQThreadWithReturn:
 
         # 这应该成功（支持多参数，但运行时需要匹配的返回值）
         thread.add_done_callback(two_params_callback)
-        thread.add_failure_callback(two_params_callback)  # 失败回调仍然只传递一个异常参数
+        thread.add_failure_callback(
+            two_params_callback
+        )  # 失败回调仍然只传递一个异常参数
 
     def test_comprehensive_callback_parameter_validation(self, qapp):
         """全面测试回调函数参数验证逻辑，确保路径和条件覆盖"""
@@ -967,17 +970,17 @@ class TestQThreadWithReturn:
         for i in range(100):
             thread = QThreadWithReturn(simple_function, i, y=0)  # 立即返回i
             threads.append(thread)
-        
+
         # 快速启动所有线程
         for thread in threads:
             thread.start()
-        
+
         # 收集所有结果
         results = []
         for thread in threads:
             result = thread.result(timeout=5.0)
             results.append(result)
-        
+
         # 验证所有结果
         expected = list(range(100))
         results.sort()
@@ -1094,254 +1097,259 @@ class TestQThreadWithReturnIntegration:
 
 class TestAdvancedCallbackFeatures:
     """测试新的回调功能：支持多返回值解包和灵活的参数匹配"""
-    
+
     def test_no_param_callback(self, qapp):
         """测试无参数回调"""
         result_container = {"called": False}
-        
+
         def no_param_callback():
             """无参数回调函数"""
             result_container["called"] = True
-        
+
         def task_with_result():
             time.sleep(0.1)
             return "some_result"
-        
+
         thread = QThreadWithReturn(task_with_result)
         thread.add_done_callback(no_param_callback)
         thread.start()
-        
+
         # 等待完成
         result = thread.result()
         assert result == "some_result"
-        
+
         # 处理Qt事件以确保回调被执行
         wait_with_events(200)
-        
+
         assert result_container["called"], "无参数回调应该被调用"
-    
+
     def test_multiple_return_values_unpacking(self, qapp):
         """测试多返回值自动解包"""
         result_container = {"values": None}
-        
+
         def multi_param_callback(a, b, c):
             """多参数回调函数"""
             result_container["values"] = (a, b, c)
-        
+
         def task_with_multiple_returns():
             time.sleep(0.1)
             return (1, 2, 3)  # 返回元组
-        
+
         thread = QThreadWithReturn(task_with_multiple_returns)
         thread.add_done_callback(multi_param_callback)
         thread.start()
-        
+
         # 等待完成
         result = thread.result()
         assert result == (1, 2, 3)
-        
+
         # 处理Qt事件以确保回调被执行
         wait_with_events(200)
-        
+
         assert result_container["values"] == (1, 2, 3), "多参数回调应该接收到解包的值"
-    
+
     def test_single_param_with_tuple_result(self, qapp):
         """测试单参数回调接收元组"""
         result_container = {"value": None}
-        
+
         def single_param_callback(values):
             """单参数回调函数"""
             result_container["value"] = values
-        
+
         def task_with_tuple_return():
             time.sleep(0.1)
             return (4, 5, 6)  # 返回元组
-        
+
         thread = QThreadWithReturn(task_with_tuple_return)
         thread.add_done_callback(single_param_callback)
         thread.start()
-        
+
         # 等待完成
         result = thread.result()
         assert result == (4, 5, 6)
-        
+
         # 处理Qt事件以确保回调被执行
         wait_with_events(200)
-        
+
         assert result_container["value"] == (4, 5, 6), "单参数回调应该接收到完整的元组"
-    
+
     def test_class_method_as_callback(self, qapp):
         """测试类方法作为回调（self参数应被忽略）"""
+
         class CallbackHandler:
             def __init__(self):
                 self.result = None
                 self.no_param_called = False
-            
+
             def handle_result(self, value):
                 """带参数的类方法回调"""
                 self.result = value
-            
+
             def handle_no_param(self):
                 """无参数的类方法回调（只有self）"""
                 self.no_param_called = True
-        
+
         handler = CallbackHandler()
-        
+
         def task1():
             time.sleep(0.1)
             return "test_value"
-        
+
         # 测试带参数的类方法
         thread1 = QThreadWithReturn(task1)
         thread1.add_done_callback(handler.handle_result)
         thread1.start()
         thread1.result()
         wait_with_events(200)
-        
+
         assert handler.result == "test_value", "类方法回调应该接收到值"
-        
+
         # 测试无参数的类方法
         thread2 = QThreadWithReturn(task1)
         thread2.add_done_callback(handler.handle_no_param)
         thread2.start()
         thread2.result()
         wait_with_events(200)
-        
+
         assert handler.no_param_called, "类方法无参数回调应该被调用"
-    
+
     def test_lambda_expressions_as_callbacks(self, qapp):
         """测试lambda表达式回调"""
         results = []
-        
+
         # 无参数lambda
         thread1 = QThreadWithReturn(lambda: "result1")
         thread1.add_done_callback(lambda: results.append("no_param"))
         thread1.start()
         thread1.result()
         wait_with_events(200)
-        
+
         # 单参数lambda
         thread2 = QThreadWithReturn(lambda: "result2")
         thread2.add_done_callback(lambda x: results.append(x))
         thread2.start()
         thread2.result()
         wait_with_events(200)
-        
+
         # 多参数lambda处理多返回值
         thread3 = QThreadWithReturn(lambda: (1, 2))
         thread3.add_done_callback(lambda a, b: results.append((a, b)))
         thread3.start()
         thread3.result()
         wait_with_events(200)
-        
+
         assert "no_param" in results, "无参数lambda应该被调用"
         assert "result2" in results, "单参数lambda应该接收到值"
         assert (1, 2) in results, "多参数lambda应该接收到解包的值"
-    
+
     def test_parameter_mismatch_error(self, qapp):
         """测试参数数量不匹配时的错误处理"""
         import sys
         from io import StringIO
-        
+
         def two_param_callback(a, b):
             """需要两个参数的回调"""
             pass
-        
+
         def task_single_return():
             return "single_value"
-        
+
         # 捕获stderr输出
         old_stderr = sys.stderr
         sys.stderr = StringIO()
-        
+
         try:
             thread = QThreadWithReturn(task_single_return)
             thread.add_done_callback(two_param_callback)
             thread.start()
             thread.result()
             wait_with_events(200)
-            
+
             # 检查是否有错误信息输出
             error_output = sys.stderr.getvalue()
-            assert "expects 2 arguments" in error_output or "Error in done callback" in error_output, \
-                "应该报告参数不匹配错误"
+            assert (
+                "expects 2 arguments" in error_output
+                or "Error in done callback" in error_output
+            ), "应该报告参数不匹配错误"
         finally:
             sys.stderr = old_stderr
-    
+
     def test_failure_callback_with_no_params(self, qapp):
         """测试无参数的失败回调"""
         error_container = {"called": False, "exception": None}
         no_param_container = {"called": False}
-        
+
         def error_callback(exc):
             """带参数的失败回调"""
             error_container["called"] = True
             error_container["exception"] = exc
-        
+
         def no_param_error_callback():
             """无参数的失败回调"""
             no_param_container["called"] = True
-        
+
         def failing_task():
             time.sleep(0.1)
             raise ValueError("Test error")
-        
+
         # 测试带参数的失败回调
         thread1 = QThreadWithReturn(failing_task)
         thread1.add_failure_callback(error_callback)
         thread1.start()
-        
+
         with pytest.raises(ValueError):
             thread1.result()
         wait_with_events(200)
-        
+
         assert error_container["called"], "失败回调应该被调用"
-        assert isinstance(error_container["exception"], ValueError), "应该接收到异常对象"
-        
+        assert isinstance(error_container["exception"], ValueError), (
+            "应该接收到异常对象"
+        )
+
         # 测试无参数的失败回调
         thread2 = QThreadWithReturn(failing_task)
         thread2.add_failure_callback(no_param_error_callback)
         thread2.start()
-        
+
         with pytest.raises(ValueError):
             thread2.result()
         wait_with_events(200)
-        
+
         assert no_param_container["called"], "无参数失败回调应该被调用"
-    
+
     def test_callback_with_default_parameters(self, qapp):
         """测试带默认参数的回调函数"""
         results = []
-        
+
         def callback_with_defaults(result, extra="default"):
             """带默认参数的回调"""
             results.append((result, extra))
-        
+
         thread = QThreadWithReturn(lambda: "test_result")
         thread.add_done_callback(callback_with_defaults)
         thread.start()
         thread.result()
         wait_with_events(200)
-        
+
         assert ("test_result", "default") in results, "带默认参数的回调应该正常工作"
-    
+
     def test_multiple_callbacks_not_supported(self, qapp):
         """测试多个回调函数（后面的会覆盖前面的）"""
         results = []
-        
+
         def callback1(result):
             results.append(f"callback1: {result}")
-        
+
         def callback2(result):
             results.append(f"callback2: {result}")
-        
+
         thread = QThreadWithReturn(lambda: "test")
         thread.add_done_callback(callback1)
         thread.add_done_callback(callback2)  # 这会覆盖callback1
         thread.start()
         thread.result()
         wait_with_events(200)
-        
+
         # 只有callback2应该被调用
         assert "callback2: test" in results, "最后设置的回调应该被调用"
         assert "callback1: test" not in results, "被覆盖的回调不应该被调用"
@@ -1349,41 +1357,41 @@ class TestAdvancedCallbackFeatures:
 
 class TestSpecificCodeBranches:
     """测试特定代码分支以确保100%覆盖率"""
-    
+
     def test_wait_method_timeout_branches(self, qapp):
         """测试wait方法的不同超时分支和force_stop功能"""
-        
+
         # 测试1: 无超时等待（-1）
         def quick_task():
             return "quick"
-        
+
         thread1 = QThreadWithReturn(quick_task)
         thread1.start()
         wait_with_events(50)  # 让线程开始
         result = thread1.wait(-1)  # 无限等待
         assert result == True
-        
+
         # 测试2: 正常超时时间内完成
         thread2 = QThreadWithReturn(quick_task)
         thread2.start()
         wait_with_events(50)
         result = thread2.wait(5000)  # 5秒超时，足够完成
         assert result == True
-        
+
         # 测试3: 超时但不强制停止
         def slow_task():
             time.sleep(0.5)
             return "slow"
-        
+
         thread3 = QThreadWithReturn(slow_task)
         thread3.start()
         wait_with_events(50)
         result = thread3.wait(100, force_stop=False)  # 100ms超时，不够完成
         assert result == False  # 应该超时返回False
-        
+
         # 清理：等待线程自然完成
         thread3.result(timeout=2.0)
-        
+
         # 测试4: 超时且强制停止
         thread4 = QThreadWithReturn(slow_task)
         thread4.start()
@@ -1392,14 +1400,14 @@ class TestSpecificCodeBranches:
         # force_stop模式下应该返回True（表示停止成功）
         assert result == True
         assert thread4._is_force_stopped or thread4.cancelled()
-        
+
         # 测试5: 已完成的线程
         thread5 = QThreadWithReturn(quick_task)
         thread5.start()
         thread5.result()  # 等待完成
         result = thread5.wait(1000)  # 已完成，应该立即返回True
         assert result == True
-        
+
         # 测试6: 已取消的线程
         thread6 = QThreadWithReturn(slow_task)
         thread6.start()
@@ -1411,61 +1419,63 @@ class TestSpecificCodeBranches:
 
     def test_wait_method_edge_cases(self, qapp):
         """测试wait方法的边界情况和错误处理"""
-        
+
         # 测试1: 零超时时间
         def quick_task():
             return "quick"
-        
+
         thread1 = QThreadWithReturn(quick_task)
         thread1.start()
         result = thread1.wait(0, force_stop=False)  # 0ms超时
         # 0超时应该立即返回，可能为False（因为没时间等待）
         # 但我们的实现确保至少1ms
         wait_for_thread_completion(thread1, 1000)  # 清理
-        
+
         # 测试2: 负数超时时间（除了-1）
         thread2 = QThreadWithReturn(quick_task)
         thread2.start()
         wait_with_events(50)  # 让线程开始执行
         result = thread2.wait(-5)  # 负数应该被转换为60000（如-1处理）
         assert result == True
-        
+
         # 测试3: 极大超时时间
         thread3 = QThreadWithReturn(quick_task)
         thread3.start()
         wait_with_events(50)
         result = thread3.wait(999999)  # 很大的超时时间
         assert result == True
-        
+
         # 测试4: 模拟Qt wait失败的情况
         def task_for_exception_test():
             time.sleep(0.1)  # 让线程运行稍微长一点
             return "test"
-        
+
         thread4 = QThreadWithReturn(task_for_exception_test)
         thread4.start()
         wait_with_events(20)  # 等待线程启动但不完成
-        
+
         # 检查线程对象是否存在
         if thread4._thread is not None:
             # 模拟Qt wait方法抛出异常
             original_wait = thread4._thread.wait
+
             def mock_wait_exception(timeout):
                 raise RuntimeError("Mock Qt wait failure")
+
             thread4._thread.wait = mock_wait_exception
-            
+
             # 应该捕获异常并回退到状态检查
             result = thread4.wait(1000)
             # 恢复原始方法以便清理
             thread4._thread.wait = original_wait
-        
+
         wait_for_thread_completion(thread4, 1000)
-        
+
         # 测试5: force_stop时worker为None的情况
         thread5 = QThreadWithReturn(quick_task)
         thread5.start()
         wait_with_events(50)
-        
+
         # 清空worker引用来测试边界情况
         original_worker = thread5._worker
         thread5._worker = None
@@ -1476,7 +1486,7 @@ class TestSpecificCodeBranches:
 
     def test_wait_force_stop_comprehensive(self, qapp):
         """测试force_stop功能的全面覆盖"""
-        
+
         # 测试1: force_stop中断响应测试
         def interruptible_task():
             # 模拟可中断的长时间任务
@@ -1484,134 +1494,142 @@ class TestSpecificCodeBranches:
             while time.time() - start_time < 2.0:
                 # 检查中断请求
                 from PySide6.QtCore import QThread
+
                 if QThread.currentThread().isInterruptionRequested():
                     return "interrupted"
                 time.sleep(0.01)
             return "completed"
-        
+
         thread1 = QThreadWithReturn(interruptible_task)
         thread1.start()
         wait_with_events(100)  # 让任务开始
-        
+
         # 使用force_stop，应该能中断任务
         result = thread1.wait(200, force_stop=True)
         assert result == True
         assert thread1._is_force_stopped or thread1.cancelled()
-        
+
         # 测试2: force_stop时线程不响应中断的情况
         def non_interruptible_task():
             # 不检查中断请求的任务
             time.sleep(1.0)
             return "completed"
-        
+
         thread2 = QThreadWithReturn(non_interruptible_task)
         thread2.start()
         wait_with_events(100)
-        
+
         # force_stop应该最终terminate线程
         result = thread2.wait(200, force_stop=True)
         assert result == True  # 强制终止成功
         assert thread2._is_force_stopped or thread2.cancelled()
-        
+
         # 测试3: force_stop异常处理
         def normal_task():
             time.sleep(0.2)  # 让线程运行稍微长一点
             return "normal"
-        
+
         thread3 = QThreadWithReturn(normal_task)
         thread3.start()
         wait_with_events(50)
-        
+
         # 检查线程对象是否存在
         if thread3._thread is not None:
             # 模拟terminate方法抛出异常
             original_terminate = thread3._thread.terminate
+
             def mock_terminate():
                 raise RuntimeError("Mock terminate failure")
+
             thread3._thread.terminate = mock_terminate
-            
+
             # 应该捕获异常并继续
             result = thread3.wait(100, force_stop=True)
             # 恢复原始方法
             thread3._thread.terminate = original_terminate
-        
+
         wait_for_thread_completion(thread3, 1000)
 
     def test_wait_without_thread(self, qapp):
         """测试没有线程时的wait方法"""
+
         def simple_task():
             return "done"
-        
+
         thread = QThreadWithReturn(simple_task)
         # 不启动线程直接wait应该返回True
         result = thread.wait()
         assert result == True
-    
+
     def test_thread_really_finished_flag(self, qapp):
         """测试_thread_really_finished标志的使用"""
+
         def quick_task():
             return "finished"
-        
+
         thread = QThreadWithReturn(quick_task)
         assert thread._thread_really_finished == False
-        
+
         thread.start()
         thread.result()
         wait_with_events(100)
-        
+
         # 线程完成后标志应该为True
         assert thread._thread_really_finished == True
-        
+
         # 再次调用running()应该返回False
         assert thread.running() == False
-    
+
     def test_timeout_timer_active_check(self, qapp):
         """测试超时定时器活跃检查分支"""
+
         def task_with_timeout():
             time.sleep(0.1)
             return "done"
-        
+
         thread = QThreadWithReturn(task_with_timeout)
         # 设置超时但任务会在超时前完成
         thread.start(500)  # 500ms超时
-        
+
         result = thread.result()
         assert result == "done"
-        
+
         # 验证超时定时器被清理
         assert thread._timeout_timer is None
-    
+
     def test_cancel_force_stop_with_wait_failure(self, qapp):
         """测试强制停止时wait失败的情况"""
+
         def blocking_task():
             time.sleep(2.0)
             return "should_not_reach"
-        
+
         thread = QThreadWithReturn(blocking_task)
         thread.start()
         wait_with_events(50)  # 让线程开始
-        
+
         # 模拟wait失败的情况
         original_wait = None
         if thread._thread:
             original_wait = thread._thread.wait
             thread._thread.wait = lambda timeout: False  # 模拟wait失败
-        
+
         # 强制取消应该仍然工作
         result = thread.cancel(force_stop=True)
         assert result == True
         assert thread.cancelled() == True
-    
+
     def test_signal_disconnect_exceptions(self, qapp):
         """测试信号断开时的异常处理"""
+
         def simple_task():
             return "done"
-        
+
         thread = QThreadWithReturn(simple_task)
         thread.start()
         thread.result()
         wait_with_events(100)
-        
+
         # 直接测试_on_thread_finished方法的异常处理能力
         # 而不是尝试patch Qt信号（因为Qt信号是只读的）
         try:
@@ -1621,15 +1639,16 @@ class TestSpecificCodeBranches:
         except Exception as e:
             # 如果有异常，记录但不失败，因为这是正常的保护行为
             print(f"Expected exception in signal disconnect: {e}")
-        
+
         # 验证线程最终状态正确
         assert thread.done() == True
-    
+
     def test_thread_pool_pending_tasks_edge_cases(self, qapp):
         """测试线程池待处理任务的边界情况 - 使用最小化测试避免资源冲突"""
+
         def quick_task(x):
             return x * 2
-        
+
         # 极简测试，只测试核心功能
         pool = QThreadPoolExecutor(max_workers=1)
         try:
@@ -1641,52 +1660,54 @@ class TestSpecificCodeBranches:
         finally:
             # 立即强制关闭，不等待
             pool.shutdown(wait=False, force_stop=True)
-    
+
     def test_thread_pool_initializer_in_submit(self, qapp):
         """测试线程池submit时初始化器的调用"""
         init_calls = {"count": 0}
-        
+
         def test_initializer():
             init_calls["count"] += 1
-        
+
         def simple_task():
             return "task_done"
-        
+
         with QThreadPoolExecutor(max_workers=2, initializer=test_initializer) as pool:
             futures = []
             for i in range(3):
                 future = pool.submit(simple_task)
                 futures.append(future)
-            
+
             for future in futures:
                 result = future.result()
                 assert result == "task_done"
-            
+
             # 初始化器应该被调用（可能多次，取决于线程数）
             assert init_calls["count"] > 0
-    
+
     def test_exception_method_with_wait_timeout(self, qapp):
         """测试exception方法的wait超时分支"""
+
         def quick_error_task():
             raise ValueError("test error")
-        
+
         thread = QThreadWithReturn(quick_error_task)
         thread.start()
-        
+
         # 等待任务完成
         wait_with_events(50)
-        
+
         # 现在应该能获取异常
         exc = thread.exception()
         assert isinstance(exc, ValueError)
         assert str(exc) == "test error"
-    
+
     def test_result_optimized_sleep_pattern(self, qapp):
         """测试result方法的优化睡眠模式"""
+
         def variable_duration_task(duration):
             time.sleep(duration)
             return f"slept_{duration}"
-        
+
         # 测试短时间任务（应该使用1ms睡眠）
         thread1 = QThreadWithReturn(variable_duration_task, 0.1)
         start_time = time.time()
@@ -1694,7 +1715,7 @@ class TestSpecificCodeBranches:
         result1 = thread1.result()
         elapsed1 = time.time() - start_time
         assert result1 == "slept_0.1"
-        
+
         # 测试中等时间任务（应该使用10ms睡眠）
         thread2 = QThreadWithReturn(variable_duration_task, 0.2)
         start_time = time.time()
@@ -1702,59 +1723,61 @@ class TestSpecificCodeBranches:
         result2 = thread2.result()
         elapsed2 = time.time() - start_time
         assert result2 == "slept_0.2"
-    
+
     def test_callback_parameter_validation_edge_cases(self, qapp):
         """测试回调参数验证的边界情况"""
         thread = QThreadWithReturn(lambda: "test")
-        
+
         # 测试带有可变参数的函数
         def varargs_callback(*args):
             pass
-        
+
         thread.add_done_callback(varargs_callback)
-        
+
         # 测试带有关键字参数的函数
         def kwargs_callback(**kwargs):
             pass
-        
+
         thread.add_done_callback(kwargs_callback)
-        
+
         # 测试混合参数的函数
         def mixed_callback(result, *args, **kwargs):
             pass
-        
+
         thread.add_done_callback(mixed_callback)
-    
+
     def test_worker_should_stop_flag(self, qapp):
         """测试Worker的should_stop标志"""
+
         def interruptible_task():
             # 模拟可中断的任务
             for i in range(100):
                 time.sleep(0.01)
                 # 在实际代码中，这里会检查QThread.isInterruptionRequested()
             return "completed"
-        
+
         thread = QThreadWithReturn(interruptible_task)
         thread.start()
-        
+
         # 等待任务开始
         wait_with_events(50)
-        
+
         # 设置停止标志
         if thread._worker:
             thread._worker._should_stop = True
-        
+
         # 取消线程
         thread.cancel()
-        
+
         # 验证状态
         assert thread.cancelled()
-    
+
     def test_thread_pool_executor_context_manager_exception(self, qapp):
         """测试线程池上下文管理器的异常处理"""
+
         def failing_task():
             raise RuntimeError("Task failed")
-        
+
         try:
             with QThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(failing_task)
@@ -1762,140 +1785,144 @@ class TestSpecificCodeBranches:
                 raise ValueError("Context manager test")
         except ValueError as e:
             assert str(e) == "Context manager test"
-        
+
         # 线程池应该已经关闭
         assert pool._shutdown == True
-    
+
     def test_as_completed_empty_futures_list(self, qapp):
         """测试as_completed方法处理空futures列表 - 简化避免系统崩溃"""
         import sys
-        
+
         # 紧急栈保护
         original_limit = sys.getrecursionlimit()
         try:
             sys.setrecursionlimit(50)  # 极低递归限制
-            
+
             # 最简单的测试，无额外处理
             empty_futures = []
             completed_list = list(QThreadPoolExecutor.as_completed(empty_futures))
             assert completed_list == []
-            
+
         finally:
             # 恢复递归限制
             sys.setrecursionlimit(original_limit)
-    
+
     def test_as_completed_with_immediate_completion(self, qapp):
         """测试as_completed方法处理立即完成的futures - 简化防崩溃"""
         import sys
-        
+
         # 栈保护
         original_limit = sys.getrecursionlimit()
         try:
             sys.setrecursionlimit(50)
-            
+
             def instant_task():
                 return "instant"
-            
+
             # 简化版本，减少任务数量
             pool = QThreadPoolExecutor(max_workers=1)
             try:
                 future = pool.submit(instant_task)
                 result = future.result(timeout=0.5)
                 assert result == "instant"
-                
+
                 # 简化的as_completed测试
-                completed_futures = list(QThreadPoolExecutor.as_completed([future], timeout=0.1))
+                completed_futures = list(
+                    QThreadPoolExecutor.as_completed([future], timeout=0.1)
+                )
                 assert len(completed_futures) == 1
                 assert completed_futures[0].result() == "instant"
-                
+
             finally:
                 pool.shutdown(wait=False, force_stop=True)
-                
+
         finally:
             sys.setrecursionlimit(original_limit)
 
 
 class TestUltraHighCoverageEdgeCases:
     """超高覆盖率边界情况测试"""
-    
+
     def test_thread_name_setting(self, qapp):
         """测试线程名称设置功能"""
+
         def named_task():
             from PySide6.QtCore import QThread
+
             return QThread.currentThread().objectName()
-        
-        thread = QThreadWithReturn(
-            named_task,
-            thread_name="TestThreadName"
-        )
+
+        thread = QThreadWithReturn(named_task, thread_name="TestThreadName")
         thread.start()
         result = thread.result()
-        
+
         # 线程名称应该被设置
         assert "TestThreadName" in result or result != ""
-    
+
     def test_callback_with_inspect_signature_failure(self, qapp):
         """测试inspect.signature失败时的处理"""
         from unittest.mock import patch
-        
+
         def test_callback(result):
             pass
-        
+
         thread = QThreadWithReturn(lambda: "test")
-        
+
         # 模拟inspect.signature抛出异常
-        with patch('inspect.signature', side_effect=ValueError("Signature inspection failed")):
+        with patch(
+            "inspect.signature", side_effect=ValueError("Signature inspection failed")
+        ):
             with pytest.raises(ValueError, match="Cannot inspect .* signature"):
                 thread.add_done_callback(test_callback)
-    
+
     @cleanup_threads_and_pools
     def test_multiple_shutdown_with_different_parameters(self, qapp):
         """测试不同参数的多次shutdown"""
+
         def slow_task():
             time.sleep(0.3)
             return "done"
-        
+
         pool = QThreadPoolExecutor(max_workers=2)
-        
+
         try:
             # 提交一些任务
             futures = []
             for i in range(3):
                 future = pool.submit(slow_task)
                 futures.append(future)
-            
+
             # 第一次shutdown不等待
             pool.shutdown(wait=False)
-            
+
             # 第二次shutdown等待
             pool.shutdown(wait=True)
-            
+
             # 第三次shutdown强制停止
             pool.shutdown(wait=True, force_stop=True)
-            
+
             # 验证状态
             assert pool._shutdown == True
         finally:
             # 确保清理
             if not pool._shutdown:
                 pool.shutdown(force_stop=True)
-    
+
     @cleanup_threads_and_pools
     def test_thread_pool_max_workers_cpu_detection(self, qapp):
         """测试线程池CPU核心数检测"""
         from unittest.mock import patch
-        
+
         # 模拟os.cpu_count()返回None
-        with patch('os.cpu_count', return_value=None):
+        with patch("os.cpu_count", return_value=None):
             pool = QThreadPoolExecutor()
             try:
                 # 应该使用默认值1
                 assert pool._max_workers >= 1
             finally:
                 pool.shutdown()
-        
+
         # 模拟os.cpu_count()返回8
-        with patch('os.cpu_count', return_value=8):
+        with patch("os.cpu_count", return_value=8):
             pool = QThreadPoolExecutor()
             try:
                 # 应该是 min(8*2, 32) = 16
@@ -1903,22 +1930,23 @@ class TestUltraHighCoverageEdgeCases:
                 assert pool._max_workers == expected
             finally:
                 pool.shutdown()
-    
+
     def test_cleanup_resources_when_already_finished(self, qapp):
         """测试已完成时的资源清理"""
+
         def simple_task():
             return "done"
-        
+
         thread = QThreadWithReturn(simple_task)
         thread.start()
         thread.result()
-        
+
         # 手动设置为已完成
         thread._is_finished = True
-        
+
         # 再次调用清理资源不应该改变状态
         thread._cleanup_resources()
-        
+
         assert thread._is_finished == True
         assert thread._done_callback is None
         assert thread._failure_callback is None
