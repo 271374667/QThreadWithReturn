@@ -214,6 +214,17 @@ class QThreadPoolExecutor:
                                 strong_self._running_workers = max(0, strong_self._running_workers - 1)
                                 strong_self._active_futures.discard(fut)
 
+                            # MEMORY LEAK FIX: Disconnect signal immediately after completion
+                            # This breaks the circular reference: future → signal → closure → future
+                            try:
+                                if hasattr(fut, '_pool_connection'):
+                                    fut.finished_signal.disconnect(fut._pool_connection)
+                                    del fut._pool_connection
+                                if hasattr(fut, '_pool_managed'):
+                                    del fut._pool_managed
+                            except (RuntimeError, TypeError):
+                                pass  # Signal may already be disconnected
+
                             # Only start new tasks if not shutdown (outside lock to avoid deadlock)
                             if not strong_self._shutdown:
                                 strong_self._try_start_tasks()
@@ -310,6 +321,9 @@ class QThreadPoolExecutor:
                     if hasattr(future, '_pool_connection'):
                         future.finished_signal.disconnect(future._pool_connection)
                         del future._pool_connection
+                    # COUNTER LOCK FIX: Clean up pool_managed flag to allow garbage collection
+                    if hasattr(future, '_pool_managed'):
+                        del future._pool_managed
                 except (RuntimeError, TypeError):
                     pass
 
