@@ -31,6 +31,8 @@
             future.result()
 """
 
+
+import contextlib
 import queue
 import threading
 import time
@@ -132,10 +134,8 @@ class QThreadPoolExecutor:
                 self.shutdown(wait=True)
         except Exception:
             # 确保即使shutdown失败也不会抛出异常
-            try:
+            with contextlib.suppress(Exception):
                 self.shutdown(wait=False, force_stop=True)
-            except Exception:
-                pass  # 最后的清理尝试
 
     def submit(self, fn: Callable, /, *args, **kwargs) -> "QThreadWithReturn":
         """提交任务到线程池执行。
@@ -221,15 +221,12 @@ class QThreadPoolExecutor:
 
                             # MEMORY LEAK FIX: Disconnect signal immediately after completion
                             # This breaks the circular reference: future → signal → closure → future
-                            try:
+                            with contextlib.suppress(RuntimeError, TypeError):
                                 if hasattr(fut, "_pool_connection"):
                                     fut.finished_signal.disconnect(fut._pool_connection)
                                     del fut._pool_connection
                                 if hasattr(fut, "_pool_managed"):
                                     del fut._pool_managed
-                            except (RuntimeError, TypeError):
-                                pass  # Signal may already be disconnected
-
                             # Only start new tasks if not shutdown (outside lock to avoid deadlock)
                             if not strong_self._shutdown:
                                 strong_self._try_start_tasks()
@@ -239,13 +236,11 @@ class QThreadPoolExecutor:
                                 f"Warning: Error in task completion handler: {e}",
                                 file=sys.stderr,
                             )
-                            try:
+                            with contextlib.suppress(Exception):
                                 with strong_self._counter_lock:
                                     strong_self._running_workers = max(
                                         0, strong_self._running_workers - 1
                                     )
-                            except Exception:
-                                pass
 
                 return safe_on_finished
 
@@ -268,15 +263,12 @@ class QThreadPoolExecutor:
             except Exception as e:
                 # STRESS TEST FIX: Rollback on failure
                 print(f"Error starting task: {e}", file=sys.stderr)
-                try:
+                with contextlib.suppress(Exception):
                     # Disconnect signal if connected
                     if hasattr(future, "_pool_connection"):
-                        try:
+                        with contextlib.suppress(RuntimeError, TypeError):
                             future.finished_signal.disconnect(future._pool_connection)
                             del future._pool_connection
-                        except (RuntimeError, TypeError):
-                            pass
-
                     # COUNTER LOCK FIX: Rollback state with lock protection
                     with self._counter_lock:
                         self._active_futures.discard(future)
@@ -284,9 +276,6 @@ class QThreadPoolExecutor:
 
                     # Re-add to pending (retry once)
                     self._pending_tasks.insert(0, future)
-                except Exception:
-                    pass
-
                 break  # Stop after error
 
     def shutdown(
@@ -321,32 +310,24 @@ class QThreadPoolExecutor:
                 # 取消待处理任务
                 pending_copy = list(self._pending_tasks)
                 for future in pending_copy:
-                    try:
+                    with contextlib.suppress(Exception):
                         future.cancel(force_stop=force_stop)
-                    except Exception:
-                        pass  # 忽略取消时的异常
                 self._pending_tasks.clear()
 
             # Fix #4: Disconnect before clearing in shutdown()
             active_copy = list(self._active_futures)
             for future in active_copy:
-                try:
+                with contextlib.suppress(RuntimeError, TypeError):
                     if hasattr(future, "_pool_connection"):
                         future.finished_signal.disconnect(future._pool_connection)
                         del future._pool_connection
                     # COUNTER LOCK FIX: Clean up pool_managed flag to allow garbage collection
                     if hasattr(future, "_pool_managed"):
                         del future._pool_managed
-                except (RuntimeError, TypeError):
-                    pass
-
             if force_stop:
                 for future in active_copy:
-                    try:
+                    with contextlib.suppress(Exception):
                         future.cancel(force_stop=True)
-                    except Exception:
-                        pass  # 忽略强制停止时的异常
-
         if wait:
             # 等待所有活跃任务完成，使用非阻塞检查避免deadlock
             import time
@@ -572,6 +553,8 @@ class QThreadWithReturn(QObject):
         self._failure_callback = callback
         self._failure_callback_params = param_count
 
+    add_exception_callback = add_failure_callback  # 别名
+
     def cancel(self, force_stop: bool = False) -> bool:
         """取消线程执行。
 
@@ -616,23 +599,18 @@ class QThreadWithReturn(QObject):
             self._thread.requestInterruption()
             if force_stop:
                 self._is_force_stopped = True
-                try:
+                with contextlib.suppress(AttributeError):
                     if not self._thread.wait(100):
                         self._thread.terminate()
                         self._thread.wait(1000)
-                except AttributeError:
-                    pass
                 self._thread_really_finished = True
                 # Fix #6: Clear callbacks in force-stop path
                 self._clear_callbacks()
                 self._cleanup_resources()
             else:
-                try:
+                with contextlib.suppress(AttributeError):
                     self._thread.quit()
                     self._thread.wait(100)
-                except AttributeError:
-                    pass
-
         # 确保在取消时也清理资源
         if not force_stop:
             self._cleanup_resources()
