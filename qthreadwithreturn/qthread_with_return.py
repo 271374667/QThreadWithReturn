@@ -180,13 +180,7 @@ class QThreadPoolExecutor:
 
     def _try_start_tasks(self):
         # COUNTER LOCK FIX: Check capacity atomically to prevent race conditions
-        while self._pending_tasks:
-            # STRESS TEST FIX: Don't start new tasks during shutdown
-            if self._shutdown:
-                break
-
-            # COUNTER LOCK FIX: Check worker capacity atomically
-            # Must check inside lock to prevent race with completion handler
+        while self._pending_tasks and not self._shutdown:
             can_start = False
             with self._counter_lock:
                 if self._running_workers < self._max_workers:
@@ -760,53 +754,41 @@ class QThreadWithReturn(QObject):
         # STRESS TEST FIX: Fast path for already-completed futures
         # Improves concurrent result() access by avoiding polling
         if self._is_finished:
-            if self._is_cancelled or self._is_force_stopped:
-                raise CancelledError()
             if self._exception:
                 raise self._exception
             return self._result
 
-        if not self._is_finished:
-            app = QApplication.instance()
-            start_time = time.monotonic()
+        app = QApplication.instance()
+        start_time = time.monotonic()
 
             # 如果没有Qt应用，使用事件等待机制
-            if app is None:
-                wait_timeout = timeout if timeout is not None else None
-                if self._completion_event.wait(wait_timeout):
-                    # 事件被设置，检查是否真的完成
-                    pass  # 继续到下面的检查
+        if app is None:
+            wait_timeout = timeout if timeout is not None else None
+            if not self._completion_event.wait(wait_timeout) and timeout is not None:
+                raise TimeoutError()
+        else:
+            # STRESS TEST FIX: Hybrid approach for high concurrency
+            # Check completion event first (faster), then poll with events
+            while not self._is_finished and not self._completion_event.wait(0.001):
+                if self._is_cancelled or self._is_force_stopped:
+                    raise CancelledError()
+
+                # Process events for main thread
+                if threading.current_thread() == threading.main_thread():
+                    app.processEvents()
+
+                # STRESS TEST FIX: Increased sleep times to reduce CPU load under concurrency
+                # Higher minimums prevent busy-waiting when many threads call result()
+                elapsed = time.monotonic() - start_time
+                if elapsed < 0.5:
+                    time.sleep(0.005)  # 5ms (was 1ms) - less aggressive under load
+                elif elapsed < 2.0:
+                    time.sleep(0.020)  # 20ms (was 10ms)
                 else:
-                    # 超时
-                    if timeout is not None:
-                        raise TimeoutError()
-            else:
-                # STRESS TEST FIX: Hybrid approach for high concurrency
-                # Check completion event first (faster), then poll with events
-                while not self._is_finished:
-                    # Check completion event with short timeout
-                    if self._completion_event.wait(0.001):  # 1ms check
-                        break  # Event signaled, exit polling loop
+                    time.sleep(0.050)  # 50ms (unchanged)
 
-                    if self._is_cancelled or self._is_force_stopped:
-                        raise CancelledError()
-
-                    # Process events for main thread
-                    if threading.current_thread() == threading.main_thread():
-                        app.processEvents()
-
-                    # STRESS TEST FIX: Increased sleep times to reduce CPU load under concurrency
-                    # Higher minimums prevent busy-waiting when many threads call result()
-                    elapsed = time.monotonic() - start_time
-                    if elapsed < 0.5:
-                        time.sleep(0.005)  # 5ms (was 1ms) - less aggressive under load
-                    elif elapsed < 2.0:
-                        time.sleep(0.020)  # 20ms (was 10ms)
-                    else:
-                        time.sleep(0.050)  # 50ms (unchanged)
-
-                    if timeout is not None and elapsed > timeout:
-                        raise TimeoutError()
+                if timeout is not None and elapsed > timeout:
+                    raise TimeoutError()
 
         # Final state checks after wait
         if self._is_cancelled or self._is_force_stopped:
@@ -840,9 +822,8 @@ class QThreadWithReturn(QObject):
         """
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
-        if not self._is_finished:
-            if not self.wait(int(timeout * 1000) if timeout is not None else -1):
-                raise TimeoutError()
+        if not self._is_finished and not self.wait(int(timeout * 1000) if timeout is not None else -1):
+            raise TimeoutError()
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
         return self._exception
@@ -908,11 +889,7 @@ class QThreadWithReturn(QObject):
 
         # 等待线程真正完成
         # 改进：对于无限等待（负数），使用更大的超时值，但不是无限大
-        if timeout_ms < 0:
-            wait_timeout = 60000  # 1分钟，而不是无限等待避免死锁
-        else:
-            wait_timeout = max(1, timeout_ms)  # 确保至少1ms
-
+        wait_timeout = 60000 if timeout_ms < 0 else max(1, timeout_ms)
         # 使用Qt线程的wait方法，增加安全检查
         try:
             if self._thread and self._thread.isRunning():
@@ -924,7 +901,8 @@ class QThreadWithReturn(QObject):
             result = (
                 self._is_finished
                 or self._thread_really_finished
-                or not (self._thread and self._thread.isRunning())
+                or not self._thread
+                or not self._thread.isRunning()
             )
 
         # 如果等待超时但需要强制停止
@@ -991,7 +969,7 @@ class QThreadWithReturn(QObject):
             return required_param_count
 
         except Exception as e:
-            raise ValueError(f"Cannot inspect {callback_name} signature: {e}")
+            raise ValueError(f"Cannot inspect {callback_name} signature: {e}") from e
 
     def _on_finished(self, result: Any) -> None:
         """处理线程完成信号"""
@@ -1159,10 +1137,7 @@ class QThreadWithReturn(QObject):
                 # 对于异常回调，总是传递异常对象（如果callback需要的话）
                 if self._failure_callback_params == 0:
                     self._failure_callback()
-                elif self._failure_callback_params == 1:
-                    self._failure_callback(exception)
                 else:
-                    # 多参数情况：只传递异常作为第一个参数，其他参数使用默认值
                     self._failure_callback(exception)
         except Exception as e:
             print(f"Error in failure callback: {e}", file=sys.stderr)
@@ -1176,8 +1151,6 @@ class QThreadWithReturn(QObject):
                 # 对于异常回调，总是传递异常对象（如果callback需要的话）
                 if param_count == 0:
                     callback()
-                elif param_count == 1:
-                    callback(exception)
                 else:
                     # 多参数情况：只传递异常作为第一个参数，其他参数使用默认值
                     callback(exception)
@@ -1231,12 +1204,9 @@ class QThreadWithReturn(QObject):
         if self._worker:
             # 只有当信号实际连接时才尝试断开
             if self._signals_connected:
-                try:
+                with contextlib.suppress(RuntimeError, TypeError):
                     self._worker._finished_signal.disconnect()
                     self._worker._error_signal.disconnect()
-                except (RuntimeError, TypeError):
-                    pass  # 信号可能已经断开或对象已被删除
-
             # 清理worker的父级回调引用
             if hasattr(self._worker, "_parent_result_callback"):
                 self._worker._parent_result_callback = None
@@ -1245,27 +1215,20 @@ class QThreadWithReturn(QObject):
 
             # Mode-aware cleanup: only use deleteLater() in Qt mode
             if has_qt_app:
-                try:
+                with contextlib.suppress(RuntimeError, AttributeError):
                     self._worker.deleteLater()
-                except (RuntimeError, AttributeError):
-                    pass
             self._worker = None
 
         if self._thread:
             # 只有当信号实际连接时才尝试断开
             if self._signals_connected:
-                try:
+                with contextlib.suppress(RuntimeError, TypeError):
                     self._thread.started.disconnect()
                     self._thread.finished.disconnect()
-                except (RuntimeError, TypeError):
-                    pass  # 信号可能已经断开或对象已被删除
-
             # Mode-aware cleanup: only use deleteLater() in Qt mode
             if has_qt_app:
-                try:
+                with contextlib.suppress(RuntimeError, AttributeError):
                     self._thread.deleteLater()
-                except (RuntimeError, AttributeError):
-                    pass
             self._thread = None
 
     def _on_timeout(self) -> None:
@@ -1279,34 +1242,30 @@ class QThreadWithReturn(QObject):
         if param_count == 0:
             # 无参数回调，不传递任何参数
             callback()
-        else:
-            # 尝试解包结果
-            if isinstance(result, tuple):
-                # 结果是元组，可以解包
-                result_count = len(result)
-                if result_count == param_count:
-                    # 参数数量匹配，解包传递
-                    callback(*result)
-                elif param_count == 1:
-                    # 回调只需要一个参数，传递整个元组
-                    callback(result)
-                else:
-                    # 参数数量不匹配
-                    raise ValueError(
-                        f"{callback_name} expects {param_count} arguments, "
-                        f"but the function returned {result_count} values: {result}"
-                    )
+        elif isinstance(result, tuple):
+            # 结果是元组，可以解包
+            result_count = len(result)
+            if result_count == param_count:
+                # 参数数量匹配，解包传递
+                callback(*result)
+            elif param_count == 1:
+                # 回调只需要一个参数，传递整个元组
+                callback(result)
             else:
-                # 结果不是元组
-                if param_count == 1:
-                    # 回调需要一个参数，直接传递
-                    callback(result)
-                else:
-                    # 回调需要多个参数，但结果不是元组
-                    raise ValueError(
-                        f"{callback_name} expects {param_count} arguments, "
-                        f"but the function returned a single value: {result}"
-                    )
+                # 参数数量不匹配
+                raise ValueError(
+                    f"{callback_name} expects {param_count} arguments, "
+                    f"but the function returned {result_count} values: {result}"
+                )
+        elif param_count == 1:
+            # 回调需要一个参数，直接传递
+            callback(result)
+        else:
+            # 回调需要多个参数，但结果不是元组
+            raise ValueError(
+                f"{callback_name} expects {param_count} arguments, "
+                f"but the function returned a single value: {result}"
+            )
 
     def _cleanup_timeout_timer(self) -> None:
         """清理超时定时器"""
@@ -1315,10 +1274,8 @@ class QThreadWithReturn(QObject):
             if self._timeout_timer.isActive():
                 self._timeout_timer.stop()
             # 断开所有信号连接
-            try:
+            with contextlib.suppress(RuntimeError, TypeError):
                 self._timeout_timer.timeout.disconnect()
-            except (RuntimeError, TypeError):
-                pass  # 信号可能已经断开
             self._timeout_timer.deleteLater()
             self._timeout_timer = None
 
@@ -1364,7 +1321,7 @@ class QThreadWithReturn(QObject):
                         else:
                             # Failed to acquire mutex - log warning but continue cleanup
                             print(
-                                f"Warning: Failed to acquire mutex during cleanup (possible deadlock avoided)",
+                                "Warning: Failed to acquire mutex during cleanup (possible deadlock avoided)",
                                 file=sys.stderr,
                             )
                     except Exception as e:
@@ -1409,10 +1366,8 @@ class QThreadWithReturn(QObject):
 
         finally:
             # Always release cleanup lock
-            try:
+            with contextlib.suppress(Exception):
                 self._cleanup_lock.release()
-            except Exception:
-                pass  # Lock already released or object destroyed
 
     class _Worker(QObject):
         """内部工作类"""
@@ -1451,12 +1406,8 @@ class QThreadWithReturn(QObject):
                     return
 
                 if self._initializer:
-                    try:
+                    with contextlib.suppress(Exception):
                         self._initializer(*self._initargs)
-                    except Exception:
-                        # 初始化器异常不影响主任务执行
-                        pass
-
                 result = self._func(*self._args, **self._kwargs)
                 if not self._should_stop:
                     # 检查是否有Qt应用，决定使用信号还是直接调用
@@ -1551,10 +1502,7 @@ class QThreadWithReturn(QObject):
                 # 对于异常回调，总是传递异常对象（如果callback需要的话）
                 if self._failure_callback_params == 0:
                     self._failure_callback()
-                elif self._failure_callback_params == 1:
-                    self._failure_callback(exception)
                 else:
-                    # 多参数情况：只传递异常作为第一个参数，其他参数使用默认值
                     self._failure_callback(exception)
             except Exception as e:
                 print(f"Error in failure callback: {e}", file=sys.stderr)
