@@ -195,46 +195,48 @@ class QThreadPoolExecutor:
             # Pop task AFTER we've reserved a slot
             future = self._pending_tasks.pop(0)
 
-            # 使用弱引用连接避免循环引用
-            import weakref
-
-            weak_self = weakref.ref(self)
+            # GC BUG FIX: Use strong reference to keep pool alive until all tasks complete
+            # The circular reference (pool → future → signal → closure → pool) is properly
+            # broken by signal disconnection (line 220) and future removal (line 214).
+            # Using weak reference causes pool to be GC'd when it's a local variable,
+            # preventing pending tasks from being scheduled after active tasks complete.
+            # This matches the behavior of concurrent.futures.ThreadPoolExecutor.
+            strong_self = self  # Strong reference to pool
 
             def make_safe_on_finished(fut):
                 def safe_on_finished():
-                    strong_self = weak_self()
-                    if strong_self is not None:
-                        try:
-                            # COUNTER LOCK FIX: Use dedicated lock for atomic counter operations
-                            # This prevents race conditions when multiple tasks complete simultaneously
+                    # strong_self is always valid because pool is kept alive
+                    try:
+                        # COUNTER LOCK FIX: Use dedicated lock for atomic counter operations
+                        # This prevents race conditions when multiple tasks complete simultaneously
+                        with strong_self._counter_lock:
+                            strong_self._running_workers = max(
+                                0, strong_self._running_workers - 1
+                            )
+                            strong_self._active_futures.discard(fut)
+
+                        # MEMORY LEAK FIX: Disconnect signal immediately after completion
+                        # This breaks the circular reference: future → signal → closure → pool
+                        with contextlib.suppress(RuntimeError, TypeError):
+                            if hasattr(fut, "_pool_connection"):
+                                fut.finished_signal.disconnect(fut._pool_connection)
+                                del fut._pool_connection
+                            if hasattr(fut, "_pool_managed"):
+                                del fut._pool_managed
+                        # Only start new tasks if not shutdown (outside lock to avoid deadlock)
+                        if not strong_self._shutdown:
+                            strong_self._try_start_tasks()
+                    except Exception as e:
+                        # COUNTER LOCK FIX: Emergency counter correction with lock protection
+                        print(
+                            f"Warning: Error in task completion handler: {e}",
+                            file=sys.stderr,
+                        )
+                        with contextlib.suppress(Exception):
                             with strong_self._counter_lock:
                                 strong_self._running_workers = max(
                                     0, strong_self._running_workers - 1
                                 )
-                                strong_self._active_futures.discard(fut)
-
-                            # MEMORY LEAK FIX: Disconnect signal immediately after completion
-                            # This breaks the circular reference: future → signal → closure → future
-                            with contextlib.suppress(RuntimeError, TypeError):
-                                if hasattr(fut, "_pool_connection"):
-                                    fut.finished_signal.disconnect(fut._pool_connection)
-                                    del fut._pool_connection
-                                if hasattr(fut, "_pool_managed"):
-                                    del fut._pool_managed
-                            # Only start new tasks if not shutdown (outside lock to avoid deadlock)
-                            if not strong_self._shutdown:
-                                strong_self._try_start_tasks()
-                        except Exception as e:
-                            # COUNTER LOCK FIX: Emergency counter correction with lock protection
-                            print(
-                                f"Warning: Error in task completion handler: {e}",
-                                file=sys.stderr,
-                            )
-                            with contextlib.suppress(Exception):
-                                with strong_self._counter_lock:
-                                    strong_self._running_workers = max(
-                                        0, strong_self._running_workers - 1
-                                    )
 
                 return safe_on_finished
 
