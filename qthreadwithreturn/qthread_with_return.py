@@ -930,7 +930,7 @@ class QThreadWithReturn(QObject):
         # 如果等待超时但需要强制停止
         if not result and force_stop and self._thread and self._thread.isRunning():
             # 强制终止线程
-            try:
+            with contextlib.suppress(Exception):
                 # 先尝试请求中断
                 self._thread.requestInterruption()
                 if self._worker:
@@ -947,10 +947,6 @@ class QThreadWithReturn(QObject):
                         self._is_force_stopped = True
                         self._thread_really_finished = True
                         self._cleanup_resources()
-            except Exception:
-                # 忽略强制终止时的异常
-                pass
-
         # 确保状态同步
         if result:
             self._thread_really_finished = True
@@ -1215,36 +1211,13 @@ class QThreadWithReturn(QObject):
         # The pool manages its own connection lifecycle, and disconnecting it here
         # prevents the pool's completion handler from being called
 
-        # Fix #1: Disconnect class-level signals to prevent reference leaks
-        # SECURITY FIX: Block signals during disconnection to prevent race condition
-        try:
-            # COUNTER LOCK FIX: Skip disconnection if this is a pool-managed thread
-            # Pool threads have _pool_managed flag and the pool will disconnect them
-            if hasattr(self, "_pool_managed") and self._pool_managed:
-                # This is a pool-managed thread, let the pool handle disconnection
-                # Just clean up other resources
-                pass
-            else:
-                # Not a pool thread, safe to disconnect all signals
-                # Block signals temporarily to prevent concurrent emit during disconnect
-                self.blockSignals(True)
-
-                # Try to disconnect all connections from these signals
-                try:
-                    self.finished_signal.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                try:
-                    self.result_ready_signal.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-        except Exception as e:
-            print(f"Warning: Signal disconnection error: {e}", file=sys.stderr)
-        finally:
-            try:
-                self.blockSignals(False)
-            except Exception:
-                pass
+        # Fix #7: Remove unnecessary signal disconnection to eliminate C++ warnings
+        # Class-level signals (finished_signal, result_ready_signal) are automatically
+        # disconnected by Qt when the object is destroyed via deleteLater().
+        # Attempting to disconnect signals with no connections causes Qt C++ warnings
+        # that cannot be suppressed by Python's contextlib.suppress.
+        # Pool connections are already explicitly disconnected at line 226.
+        # Worker signal disconnection is handled separately below (lines 1248-1253).
 
         # 确保在线程真正完成时清理所有资源
         self._cleanup_resources()
