@@ -24,11 +24,12 @@
     result = thread.result()  # 返回 10
 
     # 线程池执行
-    with QThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(time.sleep, 1) for _ in range(4)]
-        for future in futures:
-            future.add_done_callback(lambda: print("完成"))
-            future.result()
+    pool = QThreadPoolExecutor(max_workers=4)
+    pool.add_done_callback(lambda: print("所有任务完成"))
+    futures = [pool.submit(time.sleep, 1) for _ in range(4)]
+    for future in futures:
+        future.add_done_callback(lambda: print("任务完成"))
+    # 任务完成后自动触发回调，shutdown() 是可选的
 """
 
 
@@ -55,18 +56,27 @@ class QThreadPoolExecutor:
         - 自动管理线程池大小
         - 支持任务队列和并发控制
         - 返回的 Future 对象支持灵活的回调机制
-        - 支持 with 语句进行资源管理
+        - 支持池级别完成回调和任务级别失败回调
         - 支持线程命名和初始化
 
     使用示例:
-        >>> with QThreadPoolExecutor(max_workers=4) as pool:
-        ...     future = pool.submit(lambda x: x ** 2, 5)
-        ...     print(future.result())  # 输出: 25
+        >>> # 基本用法（不使用 with 语句）
+        >>> pool = QThreadPoolExecutor(max_workers=4)
+        >>> future = pool.submit(lambda x: x ** 2, 5)
+        >>> print(future.result())  # 输出: 25
         ...
-        ...     # 批量执行
-        ...     futures = [pool.submit(str.upper, x) for x in ['a', 'b', 'c']]
-        ...     results = [f.result() for f in futures]
-        ...     print(results)  # 输出: ['A', 'B', 'C']
+        >>> # 批量执行
+        >>> futures = [pool.submit(str.upper, x) for x in ['a', 'b', 'c']]
+        >>> results = [f.result() for f in futures]
+        >>> print(results)  # 输出: ['A', 'B', 'C']
+        >>> pool.shutdown(wait=True)
+        ...
+        >>> # 使用池级别回调
+        >>> pool = QThreadPoolExecutor(max_workers=2)
+        >>> pool.add_done_callback(lambda: print("所有任务完成"))
+        >>> pool.add_failure_callback(lambda e: print(f"任务失败: {e}"))
+        >>> # 提交任务...
+        >>> pool.shutdown(wait=True)
 
     Attributes:
         无公开属性，所有状态通过方法访问。
@@ -120,22 +130,17 @@ class QThreadPoolExecutor:
         self._running_workers: int = 0
         self._thread_counter = 0
 
-    def __enter__(self):
-        """支持 with 语句。"""
-        return self
+        # Callback management
+        self._done_callbacks: list[Callable] = []
+        self._failure_callbacks: list[Tuple[Callable, int]] = []  # (callback, param_count)
+        self._callbacks_lock = threading.Lock()
+        self._done_callbacks_executed = False  # Track if done callbacks already fired
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """退出 with 语句时自动关闭线程池。"""
-        try:
-            # 如果有异常，强制关闭避免hang
-            if exc_type is not None:
-                self.shutdown(wait=False, force_stop=True)
-            else:
-                self.shutdown(wait=True)
-        except Exception:
-            # 确保即使shutdown失败也不会抛出异常
-            with contextlib.suppress(Exception):
-                self.shutdown(wait=False, force_stop=True)
+        # GC BUG FIX: Self-reference to prevent garbage collection
+        # Keep pool alive while there's pending work or callbacks to execute
+        # This prevents premature GC when pool is a local variable (e.g., in GUI event handlers)
+        # The reference is released after all work completes and done callbacks execute
+        self._self_reference: Optional["QThreadPoolExecutor"] = None
 
     def submit(self, fn: Callable, /, *args, **kwargs) -> "QThreadWithReturn":
         """提交任务到线程池执行。
@@ -180,7 +185,16 @@ class QThreadPoolExecutor:
 
     def _try_start_tasks(self):
         # COUNTER LOCK FIX: Check capacity atomically to prevent race conditions
-        while self._pending_tasks and not self._shutdown:
+        # SHUTDOWN FIX: Allow starting pending tasks during shutdown (unless cancelled)
+        # Standard ThreadPoolExecutor behavior: pending tasks execute unless cancel_futures=True
+
+        # GC BUG FIX: Keep pool alive while there's work to do
+        # Set self-reference when pool has active or pending work to prevent premature GC
+        # This is critical when pool is a local variable in GUI event handlers
+        if not self._self_reference and (self._active_futures or self._pending_tasks):
+            self._self_reference = self
+
+        while self._pending_tasks:
             can_start = False
             with self._counter_lock:
                 if self._running_workers < self._max_workers:
@@ -215,6 +229,18 @@ class QThreadPoolExecutor:
                             )
                             strong_self._active_futures.discard(fut)
 
+                        # NEW: Check for task failure and call failure callbacks
+                        try:
+                            exc = fut.exception()
+                            if exc is not None:
+                                strong_self._call_failure_callbacks(exc)
+                        except CancelledError:
+                            # Task was cancelled, not a failure
+                            pass
+                        except Exception as e:
+                            # Ignore exceptions from exception() call itself
+                            pass
+
                         # MEMORY LEAK FIX: Disconnect signal immediately after completion
                         # This breaks the circular reference: future → signal → closure → pool
                         with contextlib.suppress(RuntimeError, TypeError):
@@ -223,9 +249,15 @@ class QThreadPoolExecutor:
                                 del fut._pool_connection
                             if hasattr(fut, "_pool_managed"):
                                 del fut._pool_managed
-                        # Only start new tasks if not shutdown (outside lock to avoid deadlock)
-                        if not strong_self._shutdown:
-                            strong_self._try_start_tasks()
+
+                        # NEW: Check if pool is complete and call done callbacks
+                        if strong_self._is_pool_complete():
+                            strong_self._execute_done_callbacks()
+
+                        # SHUTDOWN FIX: Start pending tasks even during shutdown
+                        # Standard ThreadPoolExecutor behavior: pending tasks execute unless cancel_futures=True
+                        # The check for shutdown is now inside _try_start_tasks (it checks if tasks were cancelled)
+                        strong_self._try_start_tasks()
                     except Exception as e:
                         # COUNTER LOCK FIX: Emergency counter correction with lock protection
                         print(
@@ -289,38 +321,44 @@ class QThreadPoolExecutor:
             force_stop: 如果为 True，强制终止运行中的线程。
 
         Note:
-            shutdown 后不能再提交新任务。
-            使用 with 语句时会自动调用 shutdown(wait=True)。
+            - shutdown 后不能再提交新任务
+            - 在PySide6应用中，建议使用 wait=False 避免UI冻结
+            - 池级别完成回调会在所有任务完成后自动触发
 
         Example:
             >>> pool = QThreadPoolExecutor(max_workers=2)
             >>> # 提交一些任务...
             >>> pool.shutdown(wait=True, cancel_futures=True)
+            ...
+            >>> # UI应用中推荐使用异步关闭
+            >>> pool.shutdown(wait=False)  # 不阻塞主线程
         """
+        # SHUTDOWN FIX: Allow wait logic to proceed even if already shut down
+        # This handles the case where shutdown is called twice:
+        # 1st: shutdown(wait=False, cancel_futures=True) - cancels pending
+        # 2nd: shutdown(wait=True, force_stop=True) - waits for active tasks
+        already_shutdown = False
         with self._shutdown_lock:
             if self._shutdown:
-                return  # 避免重复shutdown
-            self._shutdown = True
+                already_shutdown = True  # Remember this for later
+            else:
+                self._shutdown = True
 
-            if cancel_futures:
-                # 取消待处理任务
-                pending_copy = list(self._pending_tasks)
-                for future in pending_copy:
-                    with contextlib.suppress(Exception):
-                        future.cancel(force_stop=force_stop)
-                self._pending_tasks.clear()
+            # Only cancel and force-stop if NOT already shutdown
+            if not already_shutdown:
+                if cancel_futures:
+                    # 取消待处理任务
+                    pending_copy = list(self._pending_tasks)
+                    for future in pending_copy:
+                        with contextlib.suppress(Exception):
+                            future.cancel(force_stop=force_stop)
+                    self._pending_tasks.clear()
 
-            # Fix #4: Disconnect before clearing in shutdown()
+            # Copy active futures BEFORE any disconnection (even if already shutdown)
             active_copy = list(self._active_futures)
-            for future in active_copy:
-                with contextlib.suppress(RuntimeError, TypeError):
-                    if hasattr(future, "_pool_connection"):
-                        future.finished_signal.disconnect(future._pool_connection)
-                        del future._pool_connection
-                    # COUNTER LOCK FIX: Clean up pool_managed flag to allow garbage collection
-                    if hasattr(future, "_pool_managed"):
-                        del future._pool_managed
-            if force_stop:
+
+            # Only force-stop if requested AND not already shutdown
+            if not already_shutdown and force_stop:
                 for future in active_copy:
                     with contextlib.suppress(Exception):
                         future.cancel(force_stop=True)
@@ -332,7 +370,9 @@ class QThreadPoolExecutor:
             max_wait_time = 10.0  # 减少最大等待时间避免死锁
 
             # 使用轮询而不是阻塞等待来避免Qt事件循环死锁
-            while active_copy and (time.time() - start_time) < max_wait_time:
+            # SHUTDOWN FIX: Wait for both active AND pending tasks (unless cancelled)
+            # Standard behavior: shutdown(wait=True) waits for all tasks, not just active ones
+            while (active_copy or self._pending_tasks) and (time.time() - start_time) < max_wait_time:
                 completed_futures = []
                 for future in active_copy[:]:  # 创建副本避免修改时迭代
                     try:
@@ -348,15 +388,257 @@ class QThreadPoolExecutor:
                 for future in completed_futures:
                     active_copy.remove(future)
 
-                if not active_copy:
+                # SHUTDOWN FIX: Only break if BOTH active and pending are empty
+                # Don't exit early if there are still pending tasks to process
+                if not active_copy and not self._pending_tasks:
                     break
+
+                # CRITICAL FIX: Process Qt events to allow signal delivery
+                # Without this, queued signals from task completion never get processed
+                from PySide6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
 
                 # 短暂休眠避免CPU占用过高
                 time.sleep(0.01)
 
-            # 清理剩余引用
+            # CRITICAL FIX: Only clear references after wait loop completes
+            # shutdown(wait=False) should NOT destroy pending tasks - tasks continue executing
+            # Standard ThreadPoolExecutor behavior: tasks complete after shutdown unless cancelled
             self._active_futures.clear()
             self._pending_tasks.clear()
+
+            # CRITICAL FIX: Process Qt events before disconnecting signals (only if we waited)
+            # With Qt.QueuedConnection, signal emissions are queued and need event processing
+            # Must process events BEFORE disconnecting to allow queued slots to execute
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+                # Extra processing to ensure all queued callbacks complete
+                import time
+                time.sleep(0.05)  # 50ms for callbacks to execute
+                app.processEvents()
+
+            # CRITICAL FIX: Disconnect signals AFTER wait loop completes AND after processing events
+            # This allows tasks to finish and trigger their completion handlers
+            # before we clean up the signal connections
+            for future in active_copy:
+                with contextlib.suppress(RuntimeError, TypeError):
+                    if hasattr(future, "_pool_connection"):
+                        future.finished_signal.disconnect(future._pool_connection)
+                        del future._pool_connection
+                    if hasattr(future, "_pool_managed"):
+                        del future._pool_managed
+
+        # NEW: After shutdown completes, check if we need to fire done callbacks
+        # This handles the case where pool is shut down with no tasks (empty pool)
+        # or after wait=True completes with all tasks finished
+        if self._is_pool_complete():
+            self._execute_done_callbacks()
+
+    def add_done_callback(self, callback: Callable) -> None:
+        """添加池级别完成回调，当所有任务完成时执行。
+
+        回调函数会在主线程中执行（如果存在Qt应用），在以下情况触发：
+        - 所有活跃任务已完成
+        - 所有待处理任务已处理
+
+        可以注册多个回调，它们将按注册顺序执行。
+
+        Args:
+            callback: 回调函数，签名为 callback()，无参数。
+
+        Note:
+            - 回调在主线程执行，可安全更新UI
+            - 不需要调用 shutdown() 即可触发回调（所有任务完成时自动触发）
+            - 如果添加回调时池已完成，回调会立即执行
+            - 多个回调按注册顺序依次执行
+            - 池的自引用机制确保即使池是局部变量，也会等待回调执行完毕
+
+        Example:
+            >>> pool = QThreadPoolExecutor(max_workers=2)
+            >>> pool.add_done_callback(lambda: print("所有任务完成！"))
+            >>> # 提交任务...
+            >>> # 任务完成后自动触发回调，无需调用 shutdown()
+        """
+        with self._callbacks_lock:
+            self._done_callbacks.append(callback)
+
+    def add_failure_callback(self, callback: Callable) -> None:
+        """添加任务级别失败回调，当任何任务失败时执行。
+
+        回调函数会在主线程中执行（如果存在Qt应用），对每个失败的任务调用一次。
+        可以注册多个回调。
+
+        Args:
+            callback: 回调函数，签名为 callback(exception) 或 callback()。
+
+        Note:
+            - 回调在主线程执行，可安全更新UI
+            - 每个失败任务触发一次所有注册的回调
+            - 支持无参数和单参数两种签名
+
+        Example:
+            >>> pool = QThreadPoolExecutor(max_workers=2)
+            >>> pool.add_failure_callback(lambda e: print(f"任务失败: {e}"))
+            >>> pool.add_failure_callback(lambda: print("检测到失败"))
+            >>> future = pool.submit(lambda: 1/0)  # 触发两个回调
+        """
+        # 验证回调签名（0或1个参数）
+        param_count = self._validate_callback(callback, "failure_callback")
+        if param_count > 1:
+            raise ValueError(
+                "failure_callback must accept 0 or 1 parameter, "
+                f"but {param_count} parameters were detected"
+            )
+        with self._callbacks_lock:
+            self._failure_callbacks.append((callback, param_count))
+
+    def _is_pool_complete(self) -> bool:
+        """检查线程池是否已完成所有工作。
+
+        Returns:
+            bool: 如果没有活跃任务且没有待处理任务，返回True。
+
+        Note:
+            不再要求池已关闭 (shutdown)，这样即使没有调用 shutdown()，
+            当所有任务完成时也会触发 done callbacks。这对于 GUI 中的
+            局部变量池特别有用。
+        """
+        return (
+            len(self._active_futures) == 0
+            and len(self._pending_tasks) == 0
+        )
+
+    def _execute_done_callbacks(self) -> None:
+        """执行所有池级别完成回调。
+
+        Note:
+            - 只执行一次，通过 _done_callbacks_executed 标志防止重复
+            - 在主线程（Qt应用存在时）或当前线程执行
+        """
+        # 防止重复执行
+        if self._done_callbacks_executed:
+            return
+        self._done_callbacks_executed = True
+
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+
+        # 复制回调列表避免迭代时修改
+        with self._callbacks_lock:
+            callbacks_copy = list(self._done_callbacks)
+
+        for callback in callbacks_copy:
+            try:
+                if app is not None:
+                    # Qt模式：在主线程事件循环中执行
+                    QTimer.singleShot(0, callback)
+                else:
+                    # 非Qt模式：直接执行
+                    callback()
+            except Exception as e:
+                print(f"Error in pool done callback: {e}", file=sys.stderr)
+
+        # GC BUG FIX: Release self-reference AFTER done callbacks execute
+        # Pool no longer needs to keep itself alive once all work is complete and callbacks fired
+        # This allows Python GC to collect the pool if there are no external references
+        # CRITICAL: In Qt mode, callbacks are scheduled via QTimer.singleShot(0, ...)
+        # We must delay the self-reference release until those callbacks actually execute
+        if app is not None:
+            # Qt mode: Delay self-reference release until after callbacks execute
+            # Use longer delay (100ms) to ensure all callbacks complete
+            QTimer.singleShot(100, self._release_self_reference)
+        else:
+            # Non-Qt mode: Callbacks already executed, release immediately
+            self._self_reference = None
+
+    def _release_self_reference(self) -> None:
+        """Release pool self-reference after callbacks have executed."""
+        self._self_reference = None
+
+    def _validate_callback(self, callback: Callable, name: str) -> int:
+        """验证回调函数签名并返回参数数量。
+
+        Args:
+            callback: 要验证的回调函数。
+            name: 回调名称，用于错误消息。
+
+        Returns:
+            int: 回调函数需要的必需参数数量。
+
+        Raises:
+            TypeError: 如果callback不可调用。
+            ValueError: 如果无法检查callback签名。
+        """
+        if not callable(callback):
+            raise TypeError(f"{name} must be callable")
+
+        try:
+            sig = inspect.signature(callback)
+            params = list(sig.parameters.values())
+
+            # 过滤掉self参数（类方法的第一个参数）
+            if params and params[0].name == "self":
+                params = params[1:]
+
+            # 计算必需参数的数量（没有默认值的参数）
+            required_param_count = len(
+                [
+                    p
+                    for p in params
+                    if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                    and p.default is p.empty
+                ]
+            )
+
+            # 检查是否有可变参数 (*args, **kwargs)
+            has_var_positional = any(p.kind == p.VAR_POSITIONAL for p in params)
+            has_var_keyword = any(p.kind == p.VAR_KEYWORD for p in params)
+
+            # 如果有可变参数，返回最小参数数量
+            if has_var_positional or has_var_keyword:
+                return required_param_count
+
+            return required_param_count
+
+        except Exception as e:
+            raise ValueError(f"Cannot inspect {name} signature: {e}") from e
+
+    def _call_failure_callbacks(self, exception: Exception) -> None:
+        """执行所有任务失败回调。
+
+        Args:
+            exception: 任务抛出的异常对象。
+        """
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+
+        # 复制回调列表避免迭代时修改
+        with self._callbacks_lock:
+            callbacks_copy = list(self._failure_callbacks)
+
+        for callback, param_count in callbacks_copy:
+            try:
+                if app is not None:
+                    # Qt模式：在主线程事件循环中执行
+                    if param_count == 0:
+                        QTimer.singleShot(0, callback)
+                    else:
+                        # 使用lambda捕获exception，避免闭包问题
+                        QTimer.singleShot(0, lambda e=exception, cb=callback: cb(e))
+                else:
+                    # 非Qt模式：直接执行
+                    if param_count == 0:
+                        callback()
+                    else:
+                        callback(exception)
+            except Exception as e:
+                print(f"Error in pool failure callback: {e}", file=sys.stderr)
 
     @staticmethod
     def as_completed(
@@ -824,8 +1106,11 @@ class QThreadWithReturn(QObject):
         """
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
-        if not self._is_finished and not self.wait(int(timeout * 1000) if timeout is not None else -1):
-            raise TimeoutError()
+        if not self._is_finished:
+            # FIX: Compute timeout_ms separately to avoid TypeError when timeout is None
+            timeout_ms = int(timeout * 1000) if timeout is not None else -1
+            if not self.wait(timeout_ms):
+                raise TimeoutError()
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
         return self._exception
