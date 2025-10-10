@@ -56,7 +56,7 @@ class TestQThreadPoolExecutor:
             assert fut2.cancelled() or fut2.done()
             # fut1 可能已在运行，等待其完成
             try:
-                fut1.result(timeout=1)
+                fut1.result(timeout_ms=1000)
             except Exception:
                 pass
 
@@ -96,7 +96,7 @@ class TestQThreadPoolExecutor:
             fut2 = pool.submit(simple_function, 1, y=2)
             fut3 = pool.submit(simple_function, 2, y=3)
             completed = []
-            for fut in QThreadPoolExecutor.as_completed([fut1, fut2, fut3], timeout=2):
+            for fut in QThreadPoolExecutor.as_completed([fut1, fut2, fut3], timeout=2.0):
                 if fut.done():
                     completed.append(
                         fut.result()
@@ -206,7 +206,7 @@ class TestQThreadPoolExecutor:
             assert fut2.cancelled() or fut2.done()
             # fut1可能已在运行，等待其完成
             try:
-                fut1.result(timeout=2)
+                fut1.result(timeout_ms=2000)
             except Exception:
                 pass
 
@@ -584,16 +584,16 @@ class TestQThreadWithReturn:
         assert thread.exception() is None
 
     def test_result_and_exception_with_timeout(self, qapp, slow_function):
-        """测试 result(timeout) 和 exception(timeout) 超时抛出 TimeoutError"""
+        """测试 result(timeout_ms) 和 exception(timeout_ms) 超时抛出 TimeoutError"""
         import concurrent.futures
 
         thread = QThreadWithReturn(slow_function, duration=0.5)
         thread.start()
         wait_with_events(50)
         with pytest.raises(concurrent.futures.TimeoutError):
-            thread.result(timeout=0.01)
+            thread.result(timeout_ms=10)
         with pytest.raises(concurrent.futures.TimeoutError):
-            thread.exception(timeout=0.01)
+            thread.exception(timeout_ms=10)
         wait_for_thread_completion(thread, 2000)
         assert thread.result() == "completed"
         assert thread.exception() is None
@@ -983,7 +983,7 @@ class TestQThreadWithReturn:
         # 收集所有结果
         results = []
         for thread in threads:
-            result = thread.result(timeout=5.0)
+            result = thread.result(timeout_ms=5000)
             results.append(result)
 
         # 验证所有结果
@@ -1022,7 +1022,7 @@ class TestQThreadWithReturn:
         import concurrent.futures
 
         with pytest.raises(concurrent.futures.TimeoutError):
-            thread.result(timeout=0.01)
+            thread.result(timeout_ms=10)
 
         # 等待完成后应该能正常获取结果
         success = wait_for_thread_completion(thread, 2000)
@@ -1395,7 +1395,7 @@ class TestSpecificCodeBranches:
         assert result == False  # 应该超时返回False
 
         # 清理：等待线程自然完成
-        thread3.result(timeout=2.0)
+        thread3.result(timeout_ms=2000)
 
         # 测试4: 超时且强制停止
         thread4 = QThreadWithReturn(slow_task)
@@ -1639,7 +1639,7 @@ class TestSpecificCodeBranches:
         try:
             # 只提交1个任务，避免队列复杂性
             future = pool.submit(quick_task, 1)
-            result = future.result(timeout=0.5)  # 最短超时
+            result = future.result(timeout_ms=500)  # 最短超时
             assert result == 2
             assert future.done()
         finally:
@@ -1808,7 +1808,7 @@ class TestSpecificCodeBranches:
             pool = QThreadPoolExecutor(max_workers=1)
             try:
                 future = pool.submit(instant_task)
-                result = future.result(timeout=0.5)
+                result = future.result(timeout_ms=500)
                 assert result == "instant"
 
                 # 简化的as_completed测试

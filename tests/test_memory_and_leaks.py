@@ -67,7 +67,7 @@ class TestMemoryLeakPrevention:
         for i in range(1000):
             thread = QThreadWithReturn(task)
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
             # Periodic cleanup
             if i % 100 == 0:
@@ -102,7 +102,7 @@ class TestMemoryLeakPrevention:
             thread.add_done_callback(callback)
             weak_refs.append(weakref.ref(thread))
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -137,7 +137,7 @@ class TestMemoryLeakPrevention:
             thread = QThreadWithReturn(task)
             thread.add_done_callback(cb_obj.callback)
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
             del cb_obj  # Delete strong reference
 
@@ -163,7 +163,7 @@ class TestMemoryLeakPrevention:
         for _ in range(100):
             thread = QThreadWithReturn(task)
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -188,7 +188,7 @@ class TestMemoryLeakPrevention:
 
                 for future in futures:
                     try:
-                        future.result(timeout=1.0)
+                        future.result(timeout_ms=1000)
                     except Exception:
                         pass
 
@@ -277,7 +277,7 @@ class TestMemoryLeakPrevention:
             thread.start()
 
             try:
-                thread.result(timeout=0.2)
+                thread.result(timeout_ms=200)
             except Exception:
                 pass
 
@@ -324,7 +324,7 @@ class TestMemoryGrowthValidation:
         for i in range(500):
             thread = QThreadWithReturn(task, n=i)
             thread.start()
-            result = thread.result(timeout=1.0)
+            result = thread.result(timeout_ms=1000)
 
             # COUNTER LOCK FIX: Reduce GC frequency from every 100 to every 50
             # More frequent cleanup prevents accumulation
@@ -372,7 +372,7 @@ class TestMemoryGrowthValidation:
                 futures = [pool.submit(task, i) for i in range(10)]
                 for future in futures:
                     try:
-                        future.result(timeout=1.0)
+                        future.result(timeout_ms=1000)
                     except Exception:
                         pass
 
@@ -416,7 +416,7 @@ class TestResourceCleanup:
         for _ in range(50):
             thread = QThreadWithReturn(task)
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -443,7 +443,7 @@ class TestResourceCleanup:
             # Normal completion
             thread1 = QThreadWithReturn(lambda: "done")
             thread1.start()
-            thread1.result(timeout=1.0)
+            thread1.result(timeout_ms=1000)
             wait_with_events(100)
 
             # Cancellation
@@ -457,7 +457,7 @@ class TestResourceCleanup:
             thread3 = QThreadWithReturn(lambda: time.sleep(5.0), timeout=0.05)
             thread3.start()
             try:
-                thread3.result(timeout=0.2)
+                thread3.result(timeout_ms=200)
             except Exception:
                 pass
             wait_with_events(100)
@@ -469,7 +469,7 @@ class TestResourceCleanup:
             thread4 = QThreadWithReturn(failing_task)
             thread4.start()
             try:
-                thread4.result(timeout=1.0)
+                thread4.result(timeout_ms=1000)
             except Exception:
                 pass
             wait_with_events(100)
@@ -488,7 +488,7 @@ class TestResourceCleanup:
 
         thread = QThreadWithReturn(task)
         thread.start()
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
 
         wait_with_events(200)  # Allow deferred cleanup
 
@@ -512,7 +512,7 @@ class TestResourceCleanup:
 
         thread = QThreadWithReturn(task)
         thread.start()
-        thread.result(timeout=1.0)
+        thread.result(timeout_ms=1000)
 
         wait_with_events(200)
 
@@ -540,7 +540,7 @@ class TestWeakReferenceValidation:
             thread = QThreadWithReturn(task)
             weak_refs.append(weakref.ref(thread))
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -569,7 +569,7 @@ class TestWeakReferenceValidation:
             # Worker is created after start()
             if hasattr(thread, "_worker") and thread._worker is not None:
                 worker_refs.append(weakref.ref(thread._worker))
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
             # Delete strong reference
             del thread
@@ -604,7 +604,7 @@ class TestWeakReferenceValidation:
             for i in range(50):
                 future = pool.submit(task, i)
                 weak_refs.append(weakref.ref(future))
-                future.result(timeout=1.0)
+                future.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -641,7 +641,7 @@ class TestCallbackMemoryManagement:
             thread.add_done_callback(callback)
             weak_thread_refs.append(weakref.ref(thread))
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()
@@ -663,7 +663,7 @@ class TestCallbackMemoryManagement:
             thread = QThreadWithReturn(task, n=i)
             thread.add_done_callback(lambda r: results.append(r))
             thread.start()
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)
         gc.collect()

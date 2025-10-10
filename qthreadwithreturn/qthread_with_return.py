@@ -654,19 +654,20 @@ class QThreadPoolExecutor:
 
     @staticmethod
     def as_completed(
-            fs: Iterable["QThreadWithReturn"], timeout: Optional[float] = None
+            fs: Iterable["QThreadWithReturn"], timeout: float = -1
     ) -> Iterator["QThreadWithReturn"]:
         """返回一个迭代器，按完成顺序生成 Future 对象。
 
         Args:
             fs: QThreadWithReturn 对象的可迭代集合。
-            timeout: 等待的最大秒数。
+            timeout: 等待的最大秒数。<=0 表示无超时。
 
         Yields:
             QThreadWithReturn: 按完成顺序返回的 Future 对象。
 
         Raises:
             TimeoutError: 如果在 timeout 秒内没有 Future 完成。
+            TypeError: 如果 timeout 不是数字类型。
 
         Example:
             >>> futures = [pool.submit(task, i) for i in range(5)]
@@ -676,9 +677,13 @@ class QThreadPoolExecutor:
         """
         import time
 
+        # 验证 timeout 参数类型
+        if not isinstance(timeout, (int, float)):
+            raise TypeError(f"timeout must be a number, got {type(timeout).__name__}")
+
         futures = set(fs)
         done = set()
-        start_time = time.monotonic() if timeout is not None else None
+        start_time = time.monotonic() if timeout > 0 else None
         while futures:
             for fut in list(futures):
                 if fut.done():
@@ -687,7 +692,7 @@ class QThreadPoolExecutor:
                     yield fut
             if not futures:
                 break
-            if timeout is not None:
+            if timeout > 0:
                 elapsed = time.monotonic() - start_time
                 if elapsed > timeout:
                     raise TimeoutError()
@@ -911,10 +916,11 @@ class QThreadWithReturn(QObject):
         """启动线程执行任务。
 
         Args:
-            timeout_ms: 超时时间（毫秒）。-1 表示无超时。
+            timeout_ms: 超时时间（毫秒）。<=0 表示无超时。
 
         Raises:
             RuntimeError: 如果线程已在运行。
+            TypeError: 如果 timeout_ms 不是数字类型。
 
         Note:
             超时后会自动调用 cancel(force_stop=True)。
@@ -923,6 +929,12 @@ class QThreadWithReturn(QObject):
             >>> thread.start()        # 无超时
             >>> thread.start(5000)    # 5秒超时
         """
+        # 验证 timeout_ms 参数类型
+        if not isinstance(timeout_ms, (int, float)):
+            raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
+
+        # 转换为整数毫秒
+        timeout_ms = int(timeout_ms)
         if self._thread and self._thread.isRunning():
             raise RuntimeError("Thread is already running")
 
@@ -977,7 +989,7 @@ class QThreadWithReturn(QObject):
                 self._timeout_timer.timeout.connect(self._on_timeout)
                 self._timeout_timer.setSingleShot(True)
                 # 对于0超时，使用最小的正数值（1ms）
-                actual_timeout = max(1, timeout_ms) if timeout_ms >= 0 else timeout_ms
+                actual_timeout = max(1, timeout_ms)
                 self._timeout_timer.start(actual_timeout)
 
             # 启动线程
@@ -1000,13 +1012,10 @@ class QThreadWithReturn(QObject):
                 def timeout_handler():
                     import time
 
-                    actual_timeout = (
-                        max(0.001, timeout_ms / 1000.0) if timeout_ms >= 0 else None
-                    )
-                    if actual_timeout is not None:
-                        time.sleep(actual_timeout)
-                        if not self._is_finished:
-                            self.cancel(force_stop=True)
+                    actual_timeout = max(0.001, timeout_ms / 1000.0)
+                    time.sleep(actual_timeout)
+                    if not self._is_finished:
+                        self.cancel(force_stop=True)
 
                 timeout_thread = threading.Thread(target=timeout_handler, daemon=True)
                 timeout_thread.start()
@@ -1015,14 +1024,14 @@ class QThreadWithReturn(QObject):
             work_thread = threading.Thread(target=run_worker, daemon=True)
             work_thread.start()
 
-    def result(self, timeout: Optional[float] = None) -> Any:
+    def result(self, timeout_ms: int = -1) -> Any:
         """获取任务执行结果。
 
         阻塞直到任务完成，并返回结果。如果在主线程调用，
         会自动处理 Qt 事件以避免界面冻结。
 
         Args:
-            timeout: 等待超时时间（秒）。None 表示无限等待。
+            timeout_ms: 等待超时时间（毫秒）。<=0 表示无限等待。
 
         Returns:
             Any: 任务的返回值。
@@ -1031,16 +1040,23 @@ class QThreadWithReturn(QObject):
             CancelledError: 如果任务被取消。
             TimeoutError: 如果超时。
             Exception: 任务执行时抛出的异常。
+            TypeError: 如果 timeout_ms 不是数字类型。
 
         Example:
             >>> try:
-            ...     result = thread.result(timeout=5.0)
+            ...     result = thread.result(timeout_ms=5000)  # 5秒超时
             ...     print(f"Result: {result}")
             ... except TimeoutError:
             ...     print("Task timed out")
             ... except Exception as e:
             ...     print(f"Task failed: {e}")
         """
+        # 验证 timeout_ms 参数类型
+        if not isinstance(timeout_ms, (int, float)):
+            raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
+
+        # 转换为整数毫秒
+        timeout_ms = int(timeout_ms)
         from PySide6.QtWidgets import QApplication
         import threading
 
@@ -1059,8 +1075,10 @@ class QThreadWithReturn(QObject):
 
         # 如果没有Qt应用，使用事件等待机制
         if app is None:
-            wait_timeout = timeout if timeout is not None else None
-            if not self._completion_event.wait(wait_timeout) and timeout is not None:
+            wait_timeout = None
+            if timeout_ms > 0:
+                wait_timeout = timeout_ms / 1000.0  # 转换为秒
+            if wait_timeout is not None and not self._completion_event.wait(wait_timeout):
                 raise TimeoutError()
         else:
             # STRESS TEST FIX: Hybrid approach for high concurrency
@@ -1075,15 +1093,15 @@ class QThreadWithReturn(QObject):
 
                 # STRESS TEST FIX: Increased sleep times to reduce CPU load under concurrency
                 # Higher minimums prevent busy-waiting when many threads call result()
-                elapsed = time.monotonic() - start_time
-                if elapsed < 0.5:
+                elapsed_ms = (time.monotonic() - start_time) * 1000  # 转换为毫秒
+                if elapsed_ms < 500:
                     time.sleep(0.005)  # 5ms (was 1ms) - less aggressive under load
-                elif elapsed < 2.0:
+                elif elapsed_ms < 2000:
                     time.sleep(0.020)  # 20ms (was 10ms)
                 else:
                     time.sleep(0.050)  # 50ms (unchanged)
 
-                if timeout is not None and elapsed > timeout:
+                if timeout_ms > 0 and elapsed_ms > timeout_ms:
                     raise TimeoutError()
 
         # Final state checks after wait
@@ -1098,11 +1116,11 @@ class QThreadWithReturn(QObject):
 
         return self._result
 
-    def exception(self, timeout: Optional[float] = None) -> Optional[BaseException]:
+    def exception(self, timeout_ms: int = -1) -> Optional[BaseException]:
         """获取任务执行时抛出的异常。
 
         Args:
-            timeout: 等待超时时间（秒）。
+            timeout_ms: 等待超时时间（毫秒）。<=0 表示无限等待。
 
         Returns:
             Optional[BaseException]: 如果任务失败返回异常对象，成功返回 None。
@@ -1110,17 +1128,23 @@ class QThreadWithReturn(QObject):
         Raises:
             CancelledError: 如果任务被取消。
             TimeoutError: 如果超时。
+            TypeError: 如果 timeout_ms 不是数字类型。
 
         Example:
             >>> exc = thread.exception()
             >>> if exc:
             ...     print(f"Task failed with: {exc}")
         """
+        # 验证 timeout_ms 参数类型
+        if not isinstance(timeout_ms, (int, float)):
+            raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
+
+        # 转换为整数毫秒
+        timeout_ms = int(timeout_ms)
+
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
         if not self._is_finished:
-            # FIX: Compute timeout_ms separately to avoid TypeError when timeout is None
-            timeout_ms = int(timeout * 1000) if timeout is not None else -1
             if not self.wait(timeout_ms):
                 raise TimeoutError()
         if self._is_cancelled or self._is_force_stopped:
@@ -1157,11 +1181,14 @@ class QThreadWithReturn(QObject):
         """等待任务完成。
 
         Args:
-            timeout_ms: 超时时间（毫秒）。-1 表示无限等待。
+            timeout_ms: 超时时间（毫秒）。<=0 表示无限等待。
             force_stop: 如果为 True，超时后强制终止线程；否则优雅退出。
 
         Returns:
             bool: 如果任务在超时前完成返回 True，否则返回 False。
+
+        Raises:
+            TypeError: 如果 timeout_ms 不是数字类型。
 
         Example:
             >>> if thread.wait(5000):  # 等待5秒
@@ -1175,6 +1202,12 @@ class QThreadWithReturn(QObject):
             ... else:
             ...     print("Task was force stopped")
         """
+        # 验证 timeout_ms 参数类型
+        if not isinstance(timeout_ms, (int, float)):
+            raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
+
+        # 转换为整数毫秒
+        timeout_ms = int(timeout_ms)
         if not self._thread:
             return True
 
@@ -1187,8 +1220,8 @@ class QThreadWithReturn(QObject):
             return True
 
         # 等待线程真正完成
-        # 改进：对于无限等待（负数），使用更大的超时值，但不是无限大
-        wait_timeout = 60000 if timeout_ms < 0 else max(1, timeout_ms)
+        # 改进：对于无限等待（<=0），使用更大的超时值，但不是无限大
+        wait_timeout = 60000 if timeout_ms <= 0 else max(1, timeout_ms)
         # 使用Qt线程的wait方法，增加安全检查
         try:
             if self._thread and self._thread.isRunning():

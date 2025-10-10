@@ -118,7 +118,7 @@ class TestMissingCodeCoverage:
         import concurrent.futures
 
         with pytest.raises(concurrent.futures.TimeoutError):
-            thread.exception(timeout=0.1)
+            thread.exception(timeout_ms=100)
 
         # 等待任务完成后获取异常
         wait_with_events(400)

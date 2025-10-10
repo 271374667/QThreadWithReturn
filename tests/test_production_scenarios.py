@@ -65,7 +65,7 @@ class TestProductionWorkflows:
         thread = QThreadWithReturn(long_task_with_progress)
         thread.add_done_callback(done_callback)
         thread.start()
-        result = thread.result(timeout=2.0)
+        result = thread.result(timeout_ms=2000)
 
         wait_with_events(100)  # Allow callback to execute
 
@@ -90,7 +90,7 @@ class TestProductionWorkflows:
 
             for future in futures:
                 try:
-                    result = future.result(timeout=1.0)
+                    result = future.result(timeout_ms=1000)
                     results.append(result)
                 except Exception as e:
                     errors.append(str(e))
@@ -124,10 +124,10 @@ class TestProductionWorkflows:
         # Run blocking task while async is running
         sync_thread = QThreadWithReturn(quick_task)
         sync_thread.start()
-        sync_result = sync_thread.result(timeout=1.0)
+        sync_result = sync_thread.result(timeout_ms=1000)
 
         # Wait for async to complete
-        async_result = async_thread.result(timeout=1.0)
+        async_result = async_thread.result(timeout_ms=1000)
         wait_with_events(100)
 
         assert sync_result == "quick"
@@ -148,12 +148,12 @@ class TestProductionWorkflows:
         thread1.start()
 
         with pytest.raises(RuntimeError):
-            thread1.result(timeout=1.0)
+            thread1.result(timeout_ms=1000)
 
         # Subsequent tasks should still work
         thread2 = QThreadWithReturn(working_task)
         thread2.start()
-        result = thread2.result(timeout=1.0)
+        result = thread2.result(timeout_ms=1000)
 
         assert result == "success"
 
@@ -172,15 +172,15 @@ class TestProductionWorkflows:
         # Execute sequentially with dependencies
         thread1 = QThreadWithReturn(task1)
         thread1.start()
-        result1 = thread1.result(timeout=1.0)
+        result1 = thread1.result(timeout_ms=1000)
 
         thread2 = QThreadWithReturn(task2, prev_result=result1)
         thread2.start()
-        result2 = thread2.result(timeout=1.0)
+        result2 = thread2.result(timeout_ms=1000)
 
         thread3 = QThreadWithReturn(task3, prev_result=result2)
         thread3.start()
-        result3 = thread3.result(timeout=1.0)
+        result3 = thread3.result(timeout_ms=1000)
 
         assert result3["step"] == 3
         assert result3["data"] == "initial_processed_finalized"
@@ -207,7 +207,7 @@ class TestProductionWorkflows:
         # Start normal task - should work fine
         thread2 = QThreadWithReturn(normal_task)
         thread2.start()
-        result = thread2.result(timeout=1.0)
+        result = thread2.result(timeout_ms=1000)
 
         assert result == "normal_completion"
 
@@ -232,7 +232,7 @@ class TestThreadPoolSaturation:
             futures = [pool.submit(task, i) for i in range(10)]
 
             # All should complete eventually
-            results = [f.result(timeout=5.0) for f in futures]
+            results = [f.result(timeout_ms=5000) for f in futures]
 
         assert len(results) == 10
         assert results == [i * 2 for i in range(10)]
@@ -252,7 +252,7 @@ class TestThreadPoolSaturation:
             # Submit 10 tasks sequentially
             for _ in range(10):
                 future = pool.submit(task)
-                future.result(timeout=1.0)
+                future.result(timeout_ms=1000)
 
         # Each task gets a new QThread (by design of QThreadWithReturn)
         # Validate that all tasks completed
@@ -274,7 +274,7 @@ class TestThreadPoolSaturation:
 
             # Try to get result quickly - should timeout
             with pytest.raises(TimeoutError):
-                future2.result(timeout=0.1)
+                future2.result(timeout_ms=100)
 
             # Cancel both
             future1.cancel(force_stop=True)
@@ -294,7 +294,7 @@ class TestThreadPoolSaturation:
         with QThreadPoolExecutor(max_workers=2, initializer=bad_initializer) as pool:
             future = pool.submit(task)
             # Task executes despite initializer failure
-            result = future.result(timeout=1.0)
+            result = future.result(timeout_ms=1000)
             assert result == "task_result"
 
     def test_rapid_submit_cancel_cycles(self, qapp):
@@ -363,7 +363,7 @@ class TestConcurrentOperations:
         thread.start()
 
         # Wait for task to complete first
-        thread.result(timeout=2.0)
+        thread.result(timeout_ms=2000)
 
         results = []
         lock = threading.Lock()
@@ -371,7 +371,7 @@ class TestConcurrentOperations:
         def result_thread():
             try:
                 # Now all threads try to get the already-completed result
-                result = thread.result(timeout=1.0)
+                result = thread.result(timeout_ms=1000)
                 with lock:
                     results.append(("success", result))
             except Exception as e:
@@ -457,7 +457,7 @@ class TestConcurrentOperations:
                         if futures:
                             future = random.choice(futures)
                     try:
-                        future.result(timeout=0.5)
+                        future.result(timeout_ms=500)
                     except Exception:
                         pass
 
@@ -508,14 +508,14 @@ class TestCallbackResilience:
             thread = QThreadWithReturn(task)
             thread.add_done_callback(bad_callback)
             thread.start()
-            result = thread.result(timeout=1.0)
+            result = thread.result(timeout_ms=1000)
 
             wait_with_events(200)  # Allow callback to execute and fail
 
             # Event loop should still work - submit another task
             thread2 = QThreadWithReturn(task)
             thread2.start()
-            result2 = thread2.result(timeout=1.0)
+            result2 = thread2.result(timeout_ms=1000)
 
             assert result == "result"
             assert result2 == "result"
@@ -539,19 +539,19 @@ class TestCallbackResilience:
         thread1 = QThreadWithReturn(task1)
         thread1.add_done_callback(good_callback)
         thread1.start()
-        thread1.result(timeout=1.0)
+        thread1.result(timeout_ms=1000)
 
         # Task 2 with bad callback
         thread2 = QThreadWithReturn(task1)
         thread2.add_done_callback(bad_callback)
         thread2.start()
-        thread2.result(timeout=1.0)
+        thread2.result(timeout_ms=1000)
 
         # Task 3 with good callback - should still work
         thread3 = QThreadWithReturn(task1)
         thread3.add_done_callback(good_callback)
         thread3.start()
-        thread3.result(timeout=1.0)
+        thread3.result(timeout_ms=1000)
 
         wait_with_events(300)
 
@@ -573,14 +573,14 @@ class TestCallbackResilience:
 
         # Should still get original exception
         with pytest.raises(ValueError):
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(100)
 
         # System should still be operational
         thread2 = QThreadWithReturn(lambda: "ok")
         thread2.start()
-        result = thread2.result(timeout=1.0)
+        result = thread2.result(timeout_ms=1000)
         assert result == "ok"
 
 
@@ -614,7 +614,7 @@ class TestCleanupScenarios:
         weak_ref = weakref.ref(thread)
 
         thread.start()
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
 
         assert result == "done"
 
@@ -660,7 +660,7 @@ class TestCleanupScenarios:
         thread.start()
 
         with pytest.raises(RuntimeError):
-            thread.result(timeout=1.0)
+            thread.result(timeout_ms=1000)
 
         wait_with_events(200)  # Allow cleanup
 
@@ -685,7 +685,7 @@ class TestCleanupScenarios:
         gc.collect(generation=0)
 
         # All threads should complete
-        results = [t.result(timeout=1.0) for t in threads]
+        results = [t.result(timeout_ms=1000) for t in threads]
         assert all(r == "result" for r in results)
 
         wait_with_events(300)
@@ -723,7 +723,7 @@ class TestEdgeCasesAndCornerCases:
         """Test pool with 0 max_workers (should default to CPU count)"""
         with QThreadPoolExecutor(max_workers=None) as pool:
             future = pool.submit(lambda: "done")
-            result = future.result(timeout=1.0)
+            result = future.result(timeout_ms=1000)
             assert result == "done"
 
     def test_task_returning_none(self, qapp):
@@ -734,7 +734,7 @@ class TestEdgeCasesAndCornerCases:
 
         thread = QThreadWithReturn(task)
         thread.start()
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
 
         assert result is None
         assert thread.done()
@@ -749,7 +749,7 @@ class TestEdgeCasesAndCornerCases:
 
         thread = QThreadWithReturn(task)
         thread.start()
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
 
         assert result is None
         assert executed[0] is True
@@ -767,7 +767,7 @@ class TestEdgeCasesAndCornerCases:
         thread = QThreadWithReturn(task)
         thread.add_done_callback(callback)
         thread.start()
-        thread.result(timeout=1.0)
+        thread.result(timeout_ms=1000)
 
         wait_with_events(100)
 
@@ -784,7 +784,7 @@ class TestEdgeCasesAndCornerCases:
         time.sleep(0.2)  # Let it definitely complete
 
         # result() on already-complete thread
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
         assert result == "instant"
 
     def test_multiple_result_calls_same_thread(self, qapp):
@@ -796,8 +796,8 @@ class TestEdgeCasesAndCornerCases:
         thread = QThreadWithReturn(task)
         thread.start()
 
-        result1 = thread.result(timeout=1.0)
-        result2 = thread.result(timeout=1.0)
-        result3 = thread.result(timeout=1.0)
+        result1 = thread.result(timeout_ms=1000)
+        result2 = thread.result(timeout_ms=1000)
+        result3 = thread.result(timeout_ms=1000)
 
         assert result1 == result2 == result3 == "result"

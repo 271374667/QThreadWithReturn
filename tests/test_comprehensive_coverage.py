@@ -72,7 +72,7 @@ class TestBoundaryConditions:
             assert thread.cancelled(), f"{expected_behavior}超时应该取消线程"
         else:
             # 其他情况应该正常完成
-            result = thread.result(timeout=2.0)
+            result = thread.result(timeout_ms=2000)
             assert result == "completed"
 
     def test_empty_iterables(self, qapp):
@@ -116,7 +116,7 @@ class TestBoundaryConditions:
 
         thread = QThreadWithReturn(process_large_list, large_list)
         thread.start()
-        result = thread.result(timeout=5.0)
+        result = thread.result(timeout_ms=5000)
         assert result == 10000
 
 
@@ -230,7 +230,7 @@ class TestErrorHandling:
             thread = QThreadWithReturn(simple_task)
             thread.start()
             # 应该仍能正常工作，但给个短超时避免无限等待
-            result = thread.result(timeout=2.0)
+            result = thread.result(timeout_ms=2000)
             assert result == "success"
 
 
@@ -303,7 +303,7 @@ class TestDataDrivenTests:
         # 收集结果
         results = []
         for thread in threads:
-            results.append(thread.result(timeout=2.0))
+            results.append(thread.result(timeout_ms=2000))
 
         results.sort()  # 排序以便比较
         assert results == sorted(expected_results)
@@ -387,7 +387,7 @@ class TestStressTests:
             # 等待所有任务完成
             results = []
             for future in futures:
-                results.append(future.result(timeout=30.0))
+                results.append(future.result(timeout_ms=30000))
 
             # 验证结果
             assert len(results) == NUM_THREADS
@@ -411,7 +411,7 @@ class TestStressTests:
 
             results = []
             for future in futures:
-                result = future.result(timeout=10.0)
+                result = future.result(timeout_ms=10000)
                 results.append(result)
 
             assert all(r == LARGE_SIZE for r in results)
@@ -437,7 +437,7 @@ class TestStressTests:
                     cancel_count += 1
                     assert thread.cancelled()
             else:
-                result = thread.result(timeout=2.0)
+                result = thread.result(timeout_ms=2000)
                 if result == "completed":
                     success_count += 1
 
@@ -465,7 +465,7 @@ class TestStressTests:
 
             results = []
             for future in futures:
-                result = future.result(timeout=5.0)
+                result = future.result(timeout_ms=5000)
                 results.append(result)
                 assert result > 0  # 应该有正数结果
 
@@ -499,7 +499,7 @@ class TestStressTests:
 
             # 等待所有任务完成
             for future in futures:
-                future.result(timeout=5.0)
+                future.result(timeout_ms=5000)
 
             wait_with_events(500)  # 等待所有回调执行
 
@@ -600,7 +600,7 @@ class TestRaceConditions:
         for i in range(50):
             thread = QThreadWithReturn(quick_task, i)
             thread.start()
-            result = thread.result(timeout=1.0)
+            result = thread.result(timeout_ms=1000)
             results.append(result)
 
         # 验证所有结果正确

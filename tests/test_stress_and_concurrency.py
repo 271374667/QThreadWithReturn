@@ -79,7 +79,7 @@ class TestHighVolumeOperations:
         for i in range(500):
             thread = QThreadWithReturn(task, n=i)
             thread.start()
-            result = thread.result(timeout=1.0)
+            result = thread.result(timeout_ms=1000)
             if result == i * 2:
                 successful += 1
 
@@ -105,7 +105,7 @@ class TestHighVolumeOperations:
         # Get all results
         results = []
         for i, thread in enumerate(threads):
-            result = thread.result(timeout=5.0)
+            result = thread.result(timeout_ms=5000)
             results.append(result)
 
         wait_with_events(200)
@@ -127,7 +127,7 @@ class TestHighVolumeOperations:
             results = []
             for future in futures:
                 try:
-                    result = future.result(timeout=60.0)  # Long timeout for 1000 tasks
+                    result = future.result(timeout_ms=60000)  # Long timeout for 1000 tasks
                     results.append(result)
                 except Exception as e:
                     print(f"Task failed: {e}")
@@ -181,7 +181,7 @@ class TestHighVolumeOperations:
 
         # Wait for all to complete
         for thread in threads:
-            thread.result(timeout=5.0)
+            thread.result(timeout_ms=5000)
 
         wait_with_events(500)  # Allow callbacks to execute
 
@@ -239,7 +239,7 @@ class TestConcurrencyRaceConditions:
         # STRESS TEST FIX: Wait for task completion FIRST (like test_concurrent_result_calls)
         # Problem: Multiple threads calling result() simultaneously can cause timeouts
         # Solution: Ensure task completes, then test concurrent access to completed result
-        thread.result(timeout=2.0)
+        thread.result(timeout_ms=2000)
 
         results = []
         exceptions = []
@@ -248,7 +248,7 @@ class TestConcurrencyRaceConditions:
         def result_worker():
             try:
                 # Now all threads try to get the already-completed result
-                result = thread.result(timeout=1.0)
+                result = thread.result(timeout_ms=1000)
                 with lock:
                     results.append(result)
             except Exception as e:
@@ -302,7 +302,7 @@ class TestConcurrencyRaceConditions:
                         if futures:
                             future = random.choice(futures)
                     try:
-                        future.result(timeout=0.1)
+                        future.result(timeout_ms=100)
                     except Exception:
                         pass
 
@@ -327,7 +327,7 @@ class TestConcurrencyRaceConditions:
         thread.start()
 
         # Let it complete
-        result = thread.result(timeout=1.0)
+        result = thread.result(timeout_ms=1000)
         assert result == "result"
 
         # Now try concurrent cleanup operations
@@ -386,7 +386,7 @@ class TestConcurrencyRaceConditions:
             w.start()
 
         # Wait for task to complete
-        thread.result(timeout=2.0)
+        thread.result(timeout_ms=2000)
 
         # Signal workers they can stop after collecting more samples
         time.sleep(0.05)  # Let workers collect a few "done=True" samples
@@ -436,7 +436,7 @@ class TestResourceExhaustion:
             # Wait for all
             for future in futures:
                 try:
-                    future.result(timeout=5.0)
+                    future.result(timeout_ms=5000)
                 except Exception:
                     pass
 
@@ -456,7 +456,7 @@ class TestResourceExhaustion:
         # Get all results
         results = []
         for thread in threads:
-            result = thread.result(timeout=2.0)
+            result = thread.result(timeout_ms=2000)
             results.append(len(result))
 
         # Verify all results received
@@ -501,7 +501,7 @@ class TestResourceExhaustion:
             completed = []
             for future in futures[:50]:
                 try:
-                    result = future.result(timeout=5.0)
+                    result = future.result(timeout_ms=5000)
                     completed.append(result)
                 except Exception:
                     pass
@@ -542,7 +542,7 @@ class TestTimingAndPrecision:
 
         start = time.monotonic()
         try:
-            test_thread.result(timeout=0.2)
+            test_thread.result(timeout_ms=200)
         except TimeoutError:
             elapsed = time.monotonic() - start
             # Should timeout around 0.2s (allow ±0.15s tolerance under load)
@@ -551,7 +551,7 @@ class TestTimingAndPrecision:
         # Cleanup
         for thread in load_threads:
             try:
-                thread.result(timeout=1.0)
+                thread.result(timeout_ms=1000)
             except Exception:
                 pass
 
@@ -585,7 +585,7 @@ class TestTimingAndPrecision:
 
         # STRESS TEST FIX: Increased timeout and add event processing per result
         for thread in threads:
-            thread.result(timeout=2.0)  # Was 1.0s, now 2.0s
+            thread.result(timeout_ms=2000)  # Was 1.0s, now 2.0s
             # Process events after each result to help callbacks execute
             wait_with_events(20)
 
@@ -658,7 +658,7 @@ class TestErrorRecoveryUnderStress:
         exceptions = []
         for thread in threads:
             try:
-                thread.result(timeout=2.0)
+                thread.result(timeout_ms=2000)
             except Exception as e:
                 exceptions.append(e)
 
@@ -671,7 +671,7 @@ class TestErrorRecoveryUnderStress:
 
         test_thread = QThreadWithReturn(working_task)
         test_thread.start()
-        result = test_thread.result(timeout=1.0)
+        result = test_thread.result(timeout_ms=1000)
         assert result == "ok"
 
     def test_recovery_after_pool_saturation_and_errors(self, qapp):
@@ -701,7 +701,7 @@ class TestErrorRecoveryUnderStress:
             for i, future in enumerate(futures):
                 try:
                     # STRESS TEST FIX: Increased timeout from 2.0s to 3.0s
-                    future.result(timeout=3.0)
+                    future.result(timeout_ms=3000)
                 except Exception:
                     failed_count += 1
 
@@ -722,7 +722,7 @@ class TestErrorRecoveryUnderStress:
 
             future = pool.submit(working_task)
             # STRESS TEST FIX: Increased timeout from 1.0s to 2.0s
-            result = future.result(timeout=2.0)
+            result = future.result(timeout_ms=2000)
             assert result == "recovered"
 
     def test_mixed_success_failure_under_high_load(self, qapp):
@@ -759,7 +759,7 @@ class TestErrorRecoveryUnderStress:
             for future in QThreadPoolExecutor.as_completed(futures, timeout=30.0):
                 try:
                     result = future.result(
-                        timeout=0.1
+                        timeout_ms=100
                     )  # Already completed via as_completed
                     successes.append(result)
                 except Exception:
