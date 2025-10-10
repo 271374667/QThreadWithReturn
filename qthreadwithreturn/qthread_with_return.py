@@ -32,18 +32,15 @@
     # 任务完成后自动触发回调，shutdown() 是可选的
 """
 
-
 import contextlib
-import queue
+import inspect
+import sys
 import threading
 import time
-import sys
-import weakref
-from typing import Callable, Any, Optional, Iterable, Iterator, Set, Tuple
-import inspect
-
-from PySide6.QtCore import QThread, QObject, Signal, QTimer, QMutex, QWaitCondition, Qt
 from concurrent.futures import CancelledError, TimeoutError
+from typing import Callable, Any, Optional, Iterable, Iterator, Set, Tuple
+
+from PySide6.QtCore import QThread, QObject, Signal, QTimer, QMutex, QWaitCondition
 
 
 class QThreadPoolExecutor:
@@ -83,11 +80,11 @@ class QThreadPoolExecutor:
     """
 
     def __init__(
-        self,
-        max_workers: Optional[int] = None,
-        thread_name_prefix: str = "",
-        initializer: Optional[Callable] = None,
-        initargs: Tuple = (),
+            self,
+            max_workers: Optional[int] = None,
+            thread_name_prefix: str = "",
+            initializer: Optional[Callable] = None,
+            initargs: Tuple = (),
     ):
         """初始化线程池执行器。
 
@@ -141,6 +138,23 @@ class QThreadPoolExecutor:
         # This prevents premature GC when pool is a local variable (e.g., in GUI event handlers)
         # The reference is released after all work completes and done callbacks execute
         self._self_reference: Optional["QThreadPoolExecutor"] = None
+
+    def __enter__(self):
+        """不建议使用with上下文，会导致阻塞UI界面"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出 with 语句时自动关闭线程池。"""
+        try:
+            # 如果有异常，强制关闭避免hang
+            if exc_type is not None:
+                self.shutdown(wait=False, force_stop=True)
+            else:
+                self.shutdown(wait=True)
+        except Exception:
+            # 确保即使shutdown失败也不会抛出异常
+            with contextlib.suppress(Exception):
+                self.shutdown(wait=False, force_stop=True)
 
     def submit(self, fn: Callable, /, *args, **kwargs) -> "QThreadWithReturn":
         """提交任务到线程池执行。
@@ -307,11 +321,11 @@ class QThreadPoolExecutor:
                 break  # Stop after error
 
     def shutdown(
-        self,
-        wait: bool = True,
-        *,
-        cancel_futures: bool = False,
-        force_stop: bool = False,
+            self,
+            wait: bool = False,
+            *,
+            cancel_futures: bool = False,
+            force_stop: bool = False,
     ) -> None:
         """关闭线程池。
 
@@ -345,14 +359,12 @@ class QThreadPoolExecutor:
                 self._shutdown = True
 
             # Only cancel and force-stop if NOT already shutdown
-            if not already_shutdown:
-                if cancel_futures:
-                    # 取消待处理任务
-                    pending_copy = list(self._pending_tasks)
-                    for future in pending_copy:
-                        with contextlib.suppress(Exception):
-                            future.cancel(force_stop=force_stop)
-                    self._pending_tasks.clear()
+            if not already_shutdown and cancel_futures:
+                pending_copy = list(self._pending_tasks)
+                for future in pending_copy:
+                    with contextlib.suppress(Exception):
+                        future.cancel(force_stop=force_stop)
+                self._pending_tasks.clear()
 
             # Copy active futures BEFORE any disconnection (even if already shutdown)
             active_copy = list(self._active_futures)
@@ -496,6 +508,8 @@ class QThreadPoolExecutor:
         with self._callbacks_lock:
             self._failure_callbacks.append((callback, param_count))
 
+    add_exception_callback = add_done_callback  # 别名
+
     def _is_pool_complete(self) -> bool:
         """检查线程池是否已完成所有工作。
 
@@ -508,8 +522,8 @@ class QThreadPoolExecutor:
             局部变量池特别有用。
         """
         return (
-            len(self._active_futures) == 0
-            and len(self._pending_tasks) == 0
+                len(self._active_futures) == 0
+                and len(self._pending_tasks) == 0
         )
 
     def _execute_done_callbacks(self) -> None:
@@ -591,7 +605,7 @@ class QThreadPoolExecutor:
                     p
                     for p in params
                     if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-                    and p.default is p.empty
+                       and p.default is p.empty
                 ]
             )
 
@@ -624,25 +638,23 @@ class QThreadPoolExecutor:
 
         for callback, param_count in callbacks_copy:
             try:
-                if app is not None:
-                    # Qt模式：在主线程事件循环中执行
-                    if param_count == 0:
-                        QTimer.singleShot(0, callback)
-                    else:
-                        # 使用lambda捕获exception，避免闭包问题
-                        QTimer.singleShot(0, lambda e=exception, cb=callback: cb(e))
-                else:
+                if app is None:
                     # 非Qt模式：直接执行
                     if param_count == 0:
                         callback()
                     else:
                         callback(exception)
+                elif param_count == 0:
+                    QTimer.singleShot(0, callback)
+                else:
+                    # 使用lambda捕获exception，避免闭包问题
+                    QTimer.singleShot(0, lambda e=exception, cb=callback: cb(e))
             except Exception as e:
                 print(f"Error in pool failure callback: {e}", file=sys.stderr)
 
     @staticmethod
     def as_completed(
-        fs: Iterable["QThreadWithReturn"], timeout: Optional[float] = None
+            fs: Iterable["QThreadWithReturn"], timeout: Optional[float] = None
     ) -> Iterator["QThreadWithReturn"]:
         """返回一个迭代器，按完成顺序生成 Future 对象。
 
@@ -733,13 +745,13 @@ class QThreadWithReturn(QObject):
     result_ready_signal = Signal(object)
 
     def __init__(
-        self,
-        func: Callable,
-        *args,
-        initializer: Optional[Callable] = None,
-        initargs: tuple = (),
-        thread_name: Optional[str] = None,
-        **kwargs,
+            self,
+            func: Callable,
+            *args,
+            initializer: Optional[Callable] = None,
+            initargs: tuple = (),
+            thread_name: Optional[str] = None,
+            **kwargs,
     ):
         super().__init__()
         self._func: Callable = func
@@ -1045,7 +1057,7 @@ class QThreadWithReturn(QObject):
         app = QApplication.instance()
         start_time = time.monotonic()
 
-            # 如果没有Qt应用，使用事件等待机制
+        # 如果没有Qt应用，使用事件等待机制
         if app is None:
             wait_timeout = timeout if timeout is not None else None
             if not self._completion_event.wait(wait_timeout) and timeout is not None:
@@ -1186,10 +1198,10 @@ class QThreadWithReturn(QObject):
         except Exception:
             # 如果Qt wait失败，检查状态
             result = (
-                self._is_finished
-                or self._thread_really_finished
-                or not self._thread
-                or not self._thread.isRunning()
+                    self._is_finished
+                    or self._thread_really_finished
+                    or not self._thread
+                    or not self._thread.isRunning()
             )
 
         # 如果等待超时但需要强制停止
@@ -1237,7 +1249,7 @@ class QThreadWithReturn(QObject):
                     p
                     for p in params
                     if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-                    and p.default is p.empty
+                       and p.default is p.empty
                 ]
             )
 
@@ -1297,8 +1309,8 @@ class QThreadWithReturn(QObject):
                     QTimer.singleShot(
                         0,
                         lambda r=result,
-                        cb=callback,
-                        cp=callback_params: self._execute_callback_safely(
+                               cb=callback,
+                               cp=callback_params: self._execute_callback_safely(
                             cb, r, cp, "done_callback"
                         ),
                     )
@@ -1326,7 +1338,7 @@ class QThreadWithReturn(QObject):
             app.processEvents()
 
     def _execute_callback_safely(
-        self, callback: Callable, result: Any, param_count: int, callback_name: str
+            self, callback: Callable, result: Any, param_count: int, callback_name: str
     ) -> None:
         """安全执行回调函数（避免竞态条件）"""
         try:
@@ -1341,9 +1353,9 @@ class QThreadWithReturn(QObject):
         """在主线程中执行完成回调（兼容性方法）"""
         try:
             if (
-                self._done_callback
-                and not self._is_cancelled
-                and not self._is_force_stopped
+                    self._done_callback
+                    and not self._is_cancelled
+                    and not self._is_force_stopped
             ):
                 self._call_callback_with_result(
                     self._done_callback,
@@ -1389,8 +1401,8 @@ class QThreadWithReturn(QObject):
                     QTimer.singleShot(
                         0,
                         lambda exc=exception,
-                        cb=callback,
-                        cp=callback_params: self._execute_failure_callback_safely(
+                               cb=callback,
+                               cp=callback_params: self._execute_failure_callback_safely(
                             cb, exc, cp
                         ),
                     )
@@ -1417,9 +1429,9 @@ class QThreadWithReturn(QObject):
         """在主线程中执行失败回调"""
         try:
             if (
-                self._failure_callback
-                and not self._is_cancelled
-                and not self._is_force_stopped
+                    self._failure_callback
+                    and not self._is_cancelled
+                    and not self._is_force_stopped
             ):
                 # 对于异常回调，总是传递异常对象（如果callback需要的话）
                 if self._failure_callback_params == 0:
@@ -1430,7 +1442,7 @@ class QThreadWithReturn(QObject):
             print(f"Error in failure callback: {e}", file=sys.stderr)
 
     def _execute_failure_callback_safely(
-        self, callback: Callable, exception: Exception, param_count: int
+            self, callback: Callable, exception: Exception, param_count: int
     ) -> None:
         """安全执行失败回调函数（避免竞态条件）"""
         try:
@@ -1523,7 +1535,7 @@ class QThreadWithReturn(QObject):
         self.cancel(force_stop=True)
 
     def _call_callback_with_result(
-        self, callback: Callable, result: Any, param_count: int, callback_name: str
+            self, callback: Callable, result: Any, param_count: int, callback_name: str
     ) -> None:
         """根据回调函数的参数数量调用回调，支持返回值解包"""
         if param_count == 0:
@@ -1601,8 +1613,8 @@ class QThreadWithReturn(QObject):
                             if not self._is_finished:
                                 self._is_finished = True
                             if (
-                                hasattr(self, "_wait_condition")
-                                and self._wait_condition is not None
+                                    hasattr(self, "_wait_condition")
+                                    and self._wait_condition is not None
                             ):
                                 self._wait_condition.wakeAll()
                         else:
@@ -1642,8 +1654,8 @@ class QThreadWithReturn(QObject):
             try:
                 # Just clear the completion event, don't delete objects
                 if (
-                    hasattr(self, "_completion_event")
-                    and self._completion_event is not None
+                        hasattr(self, "_completion_event")
+                        and self._completion_event is not None
                 ):
                     self._completion_event.clear()
             except Exception as e:
@@ -1663,13 +1675,13 @@ class QThreadWithReturn(QObject):
         _error_signal = Signal(Exception)
 
         def __init__(
-            self,
-            func: Callable,
-            args: tuple,
-            kwargs: dict,
-            initializer: Optional[Callable] = None,
-            initargs: tuple = (),
-            thread_name: Optional[str] = None,
+                self,
+                func: Callable,
+                args: tuple,
+                kwargs: dict,
+                initializer: Optional[Callable] = None,
+                initargs: tuple = (),
+                thread_name: Optional[str] = None,
         ):
             super().__init__()
             self._func = func

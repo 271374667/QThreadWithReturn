@@ -29,24 +29,6 @@ def wait_with_events(ms):
 @pytest.mark.usefixtures("qapp_session")
 class TestQThreadPoolExecutorCallbacks:
     """Test QThreadPoolExecutor callback methods."""
-
-    # ========== Context Manager Removal Tests ==========
-
-    @pytest.mark.unit
-    def test_context_manager_removed(self):
-        """Verify context manager methods no longer exist."""
-        pool = QThreadPoolExecutor(max_workers=2)
-        try:
-            assert not hasattr(pool, '__enter__'), "Pool should not have __enter__ method"
-            assert not hasattr(pool, '__exit__'), "Pool should not have __exit__ method"
-
-            # Verify attempting to use with statement raises TypeError
-            with pytest.raises(TypeError, match="does not support the context manager protocol"):
-                with pool:
-                    pass
-        finally:
-            pool.shutdown(wait=False, force_stop=True)
-
     # ========== add_done_callback Tests ==========
 
     @pytest.mark.unit
