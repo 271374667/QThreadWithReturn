@@ -322,120 +322,182 @@ class QThreadPoolExecutor:
 
     def shutdown(
             self,
-            wait: bool = False,
+            force_stop: bool = False,
             *,
             cancel_futures: bool = False,
-            force_stop: bool = False,
+            wait: bool = False,
     ) -> None:
         """关闭线程池。
 
         Args:
-            wait: 如果为 True，阻塞直到所有运行中的任务完成。
+            force_stop: 如果为 True，立即强制终止所有任务（最高优先级），忽略其他参数。
             cancel_futures: 如果为 True，取消所有待处理的任务。
-            force_stop: 如果为 True，强制终止运行中的线程。
+            wait: 如果为 True，阻塞直到任务完成。会发出警告，因为可能导致UI冻结。
+
+        优先级说明:
+            1. force_stop=True: 最高优先级，立即强制停止所有任务并触发回调，忽略其他参数
+            2. cancel_futures=True: 取消待处理任务，等待活跃任务完成（如果wait=True）
+            3. wait=True: 阻塞直到所有任务完成（会发出警告）
 
         Note:
             - shutdown 后不能再提交新任务
-            - 在PySide6应用中，建议使用 wait=False 避免UI冻结
+            - force_stop=True 会立即标记所有任务为完成并触发池级别回调
+            - wait=True 会发出警告，因为可能导致UI无响应
             - 池级别完成回调会在所有任务完成后自动触发
 
         Example:
             >>> pool = QThreadPoolExecutor(max_workers=2)
             >>> # 提交一些任务...
-            >>> pool.shutdown(wait=True, cancel_futures=True)
+            >>> pool.shutdown(force_stop=True)  # 立即强制停止所有任务
+            ...
+            >>> # 取消待处理任务，等待活跃任务
+            >>> pool.shutdown(cancel_futures=True, wait=True)
             ...
             >>> # UI应用中推荐使用异步关闭
-            >>> pool.shutdown(wait=False)  # 不阻塞主线程
+            >>> pool.shutdown()  # 不阻塞主线程
         """
-        # SHUTDOWN FIX: Allow wait logic to proceed even if already shut down
-        # This handles the case where shutdown is called twice:
-        # 1st: shutdown(wait=False, cancel_futures=True) - cancels pending
-        # 2nd: shutdown(wait=True, force_stop=True) - waits for active tasks
+        import warnings
+        import time
+        from PySide6.QtWidgets import QApplication
+
+        # PRIORITY 1: force_stop 最高优先级路径
+        if force_stop:
+            # 发出 wait 警告（如果设置了 wait=True）
+            if wait:
+                warnings.warn(
+                    "Setting wait=True will block until all tasks complete, "
+                    "which may cause UI freezing and application unresponsiveness.",
+                    UserWarning,
+                    stacklevel=2
+                )
+
+            # 标记池为已关闭
+            with self._shutdown_lock:
+                self._shutdown = True
+                # 收集所有任务（pending + active）
+                all_tasks = list(self._pending_tasks) + list(self._active_futures)
+                # 立即清空任务列表
+                self._pending_tasks.clear()
+                self._active_futures.clear()
+
+            # 对每个任务进行强制停止处理
+            for future in all_tasks:
+                try:
+                    # 1. 标记任务为完成状态
+                    future._mutex.lock()
+                    try:
+                        if not future._is_finished:
+                            future._is_finished = True
+                            future._is_force_stopped = True
+                            future._wait_condition.wakeAll()
+                    finally:
+                        future._mutex.unlock()
+
+                    # 2. 强制终止线程（如果正在运行）
+                    if future._thread and future._thread.isRunning():
+                        with contextlib.suppress(Exception):
+                            future._thread.terminate()
+                            future._thread.wait(1000)
+
+                    # 3. 发射 finished_signal 以触发池的完成处理器
+                    # 这是确保回调执行的关键！
+                    future.finished_signal.emit()
+
+                except Exception as e:
+                    print(f"Error force-stopping task: {e}", file=sys.stderr)
+
+            # 4. 处理 Qt 事件确保所有信号被传递和处理
+            app = QApplication.instance()
+            if app is not None:
+                # 多次处理事件，给予足够时间让信号传播
+                for _ in range(5):
+                    app.processEvents()
+                    time.sleep(0.02)  # 20ms
+
+                # 额外的处理确保回调完成
+                time.sleep(0.05)  # 50ms
+                app.processEvents()
+
+            # 5. 检查并调用池级别完成回调
+            if self._is_pool_complete():
+                self._execute_done_callbacks()
+
+            # force_stop 立即返回，不管其他参数
+            return
+
+        # PRIORITY 2: 标准路径 - cancel_futures 和 wait
+        # 发出 wait 警告
+        if wait:
+            warnings.warn(
+                "Setting wait=True will block until all tasks complete, "
+                "which may cause UI freezing and application unresponsiveness.",
+                UserWarning,
+                stacklevel=2
+            )
+
+        # 标准关闭逻辑
         already_shutdown = False
         with self._shutdown_lock:
             if self._shutdown:
-                already_shutdown = True  # Remember this for later
+                already_shutdown = True
             else:
                 self._shutdown = True
 
-            # Only cancel and force-stop if NOT already shutdown
+            # 取消待处理任务（如果 cancel_futures=True）
             if not already_shutdown and cancel_futures:
                 pending_copy = list(self._pending_tasks)
                 for future in pending_copy:
                     with contextlib.suppress(Exception):
-                        future.cancel(force_stop=force_stop)
+                        future.cancel(force_stop=False)
                 self._pending_tasks.clear()
 
-            # Copy active futures BEFORE any disconnection (even if already shutdown)
+            # 复制活跃任务列表
             active_copy = list(self._active_futures)
 
-            # Only force-stop if requested AND not already shutdown
-            if not already_shutdown and force_stop:
-                for future in active_copy:
-                    with contextlib.suppress(Exception):
-                        future.cancel(force_stop=True)
+        # 如果 wait=True，等待活跃任务完成
         if wait:
-            # 等待所有活跃任务完成，使用非阻塞检查避免deadlock
-            import time
-
             start_time = time.time()
-            max_wait_time = 10.0  # 减少最大等待时间避免死锁
+            max_wait_time = 60.0  # 增加到 60 秒以支持长时间运行的任务
 
-            # 使用轮询而不是阻塞等待来避免Qt事件循环死锁
-            # SHUTDOWN FIX: Wait for both active AND pending tasks (unless cancelled)
-            # Standard behavior: shutdown(wait=True) waits for all tasks, not just active ones
+            # 轮询等待任务完成
             while (active_copy or self._pending_tasks) and (time.time() - start_time) < max_wait_time:
                 completed_futures = []
-                for future in active_copy[:]:  # 创建副本避免修改时迭代
+                for future in active_copy[:]:
                     try:
                         if future.done():
                             completed_futures.append(future)
                         else:
-                            # 非阻塞检查，避免调用result()导致的死锁
-                            future.wait(50, force_stop=False)  # 50ms非阻塞检查
+                            future.wait(50, force_stop=False)  # 50ms 非阻塞检查
                     except Exception:
-                        completed_futures.append(future)  # 出错也视为完成
+                        completed_futures.append(future)
 
-                # 移除已完成的future
+                # 移除已完成的任务
                 for future in completed_futures:
                     active_copy.remove(future)
 
-                # SHUTDOWN FIX: Only break if BOTH active and pending are empty
-                # Don't exit early if there are still pending tasks to process
+                # 检查是否所有任务都完成
                 if not active_copy and not self._pending_tasks:
                     break
 
-                # CRITICAL FIX: Process Qt events to allow signal delivery
-                # Without this, queued signals from task completion never get processed
-                from PySide6.QtWidgets import QApplication
+                # 处理 Qt 事件
                 app = QApplication.instance()
                 if app is not None:
                     app.processEvents()
 
-                # 短暂休眠避免CPU占用过高
                 time.sleep(0.01)
 
-            # CRITICAL FIX: Only clear references after wait loop completes
-            # shutdown(wait=False) should NOT destroy pending tasks - tasks continue executing
-            # Standard ThreadPoolExecutor behavior: tasks complete after shutdown unless cancelled
+            # 清理引用
             self._active_futures.clear()
             self._pending_tasks.clear()
 
-            # CRITICAL FIX: Process Qt events before disconnecting signals (only if we waited)
-            # With Qt.QueuedConnection, signal emissions are queued and need event processing
-            # Must process events BEFORE disconnecting to allow queued slots to execute
-            from PySide6.QtWidgets import QApplication
+            # 处理剩余的 Qt 事件
             app = QApplication.instance()
             if app is not None:
                 app.processEvents()
-                # Extra processing to ensure all queued callbacks complete
-                import time
-                time.sleep(0.05)  # 50ms for callbacks to execute
+                time.sleep(0.05)
                 app.processEvents()
 
-            # CRITICAL FIX: Disconnect signals AFTER wait loop completes AND after processing events
-            # This allows tasks to finish and trigger their completion handlers
-            # before we clean up the signal connections
+            # 断开信号连接
             for future in active_copy:
                 with contextlib.suppress(RuntimeError, TypeError):
                     if hasattr(future, "_pool_connection"):
@@ -444,9 +506,7 @@ class QThreadPoolExecutor:
                     if hasattr(future, "_pool_managed"):
                         del future._pool_managed
 
-        # NEW: After shutdown completes, check if we need to fire done callbacks
-        # This handles the case where pool is shut down with no tasks (empty pool)
-        # or after wait=True completes with all tasks finished
+        # 检查并调用池级别完成回调
         if self._is_pool_complete():
             self._execute_done_callbacks()
 
