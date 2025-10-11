@@ -126,6 +126,7 @@ class QThreadPoolExecutor:
         self._pending_tasks: list = []
         self._running_workers: int = 0
         self._thread_counter = 0
+        self._waiting_for_shutdown = False  # Track if shutdown(wait=True) is in progress
 
         # Callback management
         self._done_callbacks: list[Callable] = []
@@ -201,6 +202,12 @@ class QThreadPoolExecutor:
         # COUNTER LOCK FIX: Check capacity atomically to prevent race conditions
         # SHUTDOWN FIX: Allow starting pending tasks during shutdown (unless cancelled)
         # Standard ThreadPoolExecutor behavior: pending tasks execute unless cancel_futures=True
+
+        # DEADLOCK FIX: Don't start new tasks during shutdown(wait=True)
+        # If shutdown(wait=True) is waiting for tasks to complete, starting new tasks
+        # creates an infinite loop where the wait never completes
+        if self._waiting_for_shutdown:
+            return
 
         # GC BUG FIX: Keep pool alive while there's work to do
         # Set self-reference when pool has active or pending work to prevent premature GC
@@ -501,55 +508,66 @@ class QThreadPoolExecutor:
 
         # 如果 wait=True，等待所有任务完成（包括新启动的任务）
         if wait:
-            start_time = time.time()
-            max_wait_time = 60.0  # 增加到 60 秒以支持长时间运行的任务
+            # DEADLOCK FIX: Set flag to prevent _try_start_tasks from starting cancelled tasks
+            # Only set this when cancel_futures=True, otherwise pending tasks should be allowed to start
+            if cancel_futures:
+                self._waiting_for_shutdown = True
+            try:
+                start_time = time.time()
+                max_wait_time = 60.0  # 增加到 60 秒以支持长时间运行的任务
 
-            # 轮询等待所有任务完成
-            # 注意：不能只等待 active_copy，因为 pending_tasks 会被动态启动
-            while (time.time() - start_time) < max_wait_time:
-                # 获取当前所有活跃和待处理的任务（动态检查）
-                with self._counter_lock:
-                    current_active = list(self._active_futures)
-                    current_pending = list(self._pending_tasks)
+                # 轮询等待所有任务完成
+                # 注意：不能只等待 active_copy，因为 pending_tasks 会被动态启动
+                while (time.time() - start_time) < max_wait_time:
+                    # 获取当前所有活跃和待处理的任务（动态检查）
+                    with self._counter_lock:
+                        current_active = list(self._active_futures)
+                        current_pending = list(self._pending_tasks)
 
-                # 如果没有任务了，退出
-                if not current_active and not current_pending:
-                    break
+                    # 如果没有未完成的任务，退出
+                    # HANG FIX: Check if futures are done, not just if set is empty
+                    # Cancelled futures may still be in _active_futures but are done()
+                    active_not_done = [f for f in current_active if not f.done()]
+                    if not active_not_done and not current_pending:
+                        break
 
-                # 检查并等待活跃任务
-                for future in current_active:
-                    try:
-                        if not future.done():
-                            future.wait(50, force_stop=False)  # 50ms 非阻塞检查
-                    except Exception:
-                        pass  # 忽略异常，继续检查其他任务
+                    # 检查并等待活跃任务
+                    for future in current_active:
+                        try:
+                            if not future.done():
+                                future.wait(50, force_stop=False)  # 50ms 非阻塞检查
+                        except Exception:
+                            pass  # 忽略异常，继续检查其他任务
 
-                # 处理 Qt 事件（允许新任务启动和回调执行）
+                    # 处理 Qt 事件（允许新任务启动和回调执行）
+                    app = QApplication.instance()
+                    if app is not None:
+                        app.processEvents()
+
+                    time.sleep(0.01)
+
+                # 清理引用
+                self._active_futures.clear()
+                self._pending_tasks.clear()
+
+                # 处理剩余的 Qt 事件
                 app = QApplication.instance()
                 if app is not None:
                     app.processEvents()
+                    time.sleep(0.05)
+                    app.processEvents()
 
-                time.sleep(0.01)
-
-            # 清理引用
-            self._active_futures.clear()
-            self._pending_tasks.clear()
-
-            # 处理剩余的 Qt 事件
-            app = QApplication.instance()
-            if app is not None:
-                app.processEvents()
-                time.sleep(0.05)
-                app.processEvents()
-
-            # 断开信号连接
-            for future in active_copy:
-                with contextlib.suppress(RuntimeError, TypeError):
-                    if hasattr(future, "_pool_connection"):
-                        future.finished_signal.disconnect(future._pool_connection)
-                        del future._pool_connection
-                    if hasattr(future, "_pool_managed"):
-                        del future._pool_managed
+                # 断开信号连接
+                for future in active_copy:
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        if hasattr(future, "_pool_connection"):
+                            future.finished_signal.disconnect(future._pool_connection)
+                            del future._pool_connection
+                        if hasattr(future, "_pool_managed"):
+                            del future._pool_managed
+            finally:
+                # DEADLOCK FIX: Always clear the flag after wait completes
+                self._waiting_for_shutdown = False
 
         # 检查并调用池级别完成回调
         if self._is_pool_complete():
