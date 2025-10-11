@@ -655,7 +655,15 @@ class QThreadPoolExecutor:
             try:
                 if app is not None:
                     # Qt模式：在主线程事件循环中执行
-                    QTimer.singleShot(0, callback)
+                    # CALLBACK EXCEPTION FIX: Wrap callback to catch exceptions
+                    # Callbacks executed via QTimer.singleShot() can raise exceptions during processEvents()
+                    # which would propagate to the caller (e.g., shutdown()). We must catch and log them.
+                    def safe_callback(cb=callback):
+                        try:
+                            cb()
+                        except Exception as e:
+                            print(f"Error in pool done callback: {e}", file=sys.stderr)
+                    QTimer.singleShot(0, safe_callback)
                 else:
                     # 非Qt模式：直接执行
                     callback()
@@ -750,10 +758,22 @@ class QThreadPoolExecutor:
                     else:
                         callback(exception)
                 elif param_count == 0:
-                    QTimer.singleShot(0, callback)
+                    # CALLBACK EXCEPTION FIX: Wrap callback to catch exceptions
+                    def safe_callback(cb=callback):
+                        try:
+                            cb()
+                        except Exception as e:
+                            print(f"Error in pool failure callback: {e}", file=sys.stderr)
+                    QTimer.singleShot(0, safe_callback)
                 else:
+                    # CALLBACK EXCEPTION FIX: Wrap callback to catch exceptions
                     # 使用lambda捕获exception，避免闭包问题
-                    QTimer.singleShot(0, lambda e=exception, cb=callback: cb(e))
+                    def safe_callback_with_exc(e=exception, cb=callback):
+                        try:
+                            cb(e)
+                        except Exception as err:
+                            print(f"Error in pool failure callback: {err}", file=sys.stderr)
+                    QTimer.singleShot(0, safe_callback_with_exc)
             except Exception as e:
                 print(f"Error in pool failure callback: {e}", file=sys.stderr)
 
