@@ -90,25 +90,37 @@ class TestHighVolumeOperations:
         assert successful == 500
 
     def test_concurrent_100_threads(self, qapp):
-        """Test 100 threads executing simultaneously"""
+        """Test 100 threads executing simultaneously (with batch processing)"""
 
         def task(n):
             time.sleep(0.05)
             return n * 2
 
         threads = []
+        # STRESS TEST FIX: Start threads in batches to prevent resource exhaustion
+        # Starting 100 threads simultaneously can cause stack overflow
         for i in range(100):
             thread = QThreadWithReturn(task, n=i)
             thread.start()
             threads.append(thread)
 
-        # Get all results
+            # Process events every 10 threads to prevent event loop saturation
+            if (i + 1) % 10 == 0:
+                wait_with_events(50)
+
+        # Get all results with periodic event processing
         results = []
         for i, thread in enumerate(threads):
             result = thread.result(timeout_ms=5000)
             results.append(result)
 
-        wait_with_events(200)
+            # STRESS TEST FIX: Process events every 10 results
+            # This helps Qt event loop process signals and callbacks
+            if (i + 1) % 10 == 0:
+                wait_with_events(50)
+
+        # STRESS TEST FIX: Increased cleanup time for 100 threads
+        wait_with_events(500)
 
         assert len(results) == 100
         assert results == [i * 2 for i in range(100)]

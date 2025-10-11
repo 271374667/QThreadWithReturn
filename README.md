@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![PySide6](https://img.shields.io/badge/PySide6-6.4+-green.svg)](https://www.qt.io/qt-for-python)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-200%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-241%20passed-brightgreen.svg)](tests/)
 
 基于 PySide6 的多线程高度封装库，简化 GUI 应用中的多线程编程。
 

@@ -907,6 +907,10 @@ class QThreadWithReturn(QObject):
         self._cleanup_in_progress: bool = False
         self._cleanup_lock: threading.Lock = threading.Lock()
 
+        # STACK OVERFLOW FIX: Prevent recursive _on_finished calls
+        self._in_on_finished: bool = False
+        self._in_on_error: bool = False
+
     def add_done_callback(self, callback: Callable) -> None:
         """添加任务成功完成后的回调函数。
 
@@ -1441,9 +1445,24 @@ class QThreadWithReturn(QObject):
 
     def _on_finished(self, result: Any) -> None:
         """处理线程完成信号"""
+        # STACK OVERFLOW FIX: Prevent recursive re-entry
+        # When processEvents() is called, it may trigger queued _on_finished() calls
+        # This creates infinite recursion: _on_finished → processEvents → _on_finished...
+        if self._in_on_finished or self._cleanup_in_progress:
+            return
+
         if self._is_cancelled or self._is_force_stopped:
             return
 
+        # Set re-entry guard
+        self._in_on_finished = True
+        try:
+            self._on_finished_impl(result)
+        finally:
+            self._in_on_finished = False
+
+    def _on_finished_impl(self, result: Any) -> None:
+        """Internal implementation of _on_finished"""
         self._mutex.lock()
         try:
             self._result = result
@@ -1483,10 +1502,10 @@ class QThreadWithReturn(QObject):
                             cb, r, cp, "done_callback"
                         ),
                     )
-                    # STRESS TEST FIX: Force immediate event processing for callback execution
-                    # Under high load (50+ concurrent threads), callbacks may not execute
-                    # unless we explicitly process events after scheduling
-                    app.processEvents()
+                    # STACK OVERFLOW FIX: REMOVED app.processEvents() call
+                    # Explicit processEvents() causes cascading recursion across multiple instances:
+                    # Instance A: processEvents() → triggers Instance B: _on_finished() → processEvents() → ...
+                    # Qt's event loop will naturally process these callbacks without explicit forcing.
                 else:
                     # Non-Qt mode: execute directly
                     self._execute_callback_safely(
@@ -1498,13 +1517,10 @@ class QThreadWithReturn(QObject):
         # 发射任务完成信号
         self.finished_signal.emit()
 
-        # STRESS TEST FIX: Process events again after signal emission
-        # Ensures signals propagate to connected slots immediately
-        from PySide6.QtWidgets import QApplication
-
-        app = QApplication.instance()
-        if app is not None:
-            app.processEvents()
+        # STACK OVERFLOW FIX: REMOVED app.processEvents() call
+        # Explicit processEvents() causes cascading recursion across multiple instances:
+        # Instance A: processEvents() → triggers Instance B: _on_finished() → processEvents() → ...
+        # Qt's event loop will naturally process these callbacks without explicit forcing.
 
     def _execute_callback_safely(
             self, callback: Callable, result: Any, param_count: int, callback_name: str
@@ -1537,9 +1553,23 @@ class QThreadWithReturn(QObject):
 
     def _on_error(self, exception: Exception) -> None:
         """处理线程错误信号"""
+        # STACK OVERFLOW FIX: Prevent recursive re-entry
+        # Same as _on_finished() - prevent recursion from processEvents()
+        if self._in_on_error or self._cleanup_in_progress:
+            return
+
         if self._is_cancelled or self._is_force_stopped:
             return
 
+        # Set re-entry guard
+        self._in_on_error = True
+        try:
+            self._on_error_impl(exception)
+        finally:
+            self._in_on_error = False
+
+    def _on_error_impl(self, exception: Exception) -> None:
+        """Internal implementation of _on_error"""
         self._mutex.lock()
         try:
             self._exception = exception
@@ -1587,12 +1617,10 @@ class QThreadWithReturn(QObject):
         # Pool completion handler needs to be called regardless of success/failure
         self.finished_signal.emit()
 
-        # Process events to ensure signal delivery
-        from PySide6.QtWidgets import QApplication
-
-        app = QApplication.instance()
-        if app is not None:
-            app.processEvents()
+        # STACK OVERFLOW FIX: REMOVED app.processEvents() call
+        # Same reasoning as in _on_finished_impl: explicit processEvents() creates
+        # cascading cross-instance recursion under high load (1000+ concurrent tasks).
+        # Qt's event loop will naturally process these callbacks.
 
     def _execute_failure_callback(self, exception: Exception) -> None:
         """在主线程中执行失败回调"""
@@ -1859,16 +1887,14 @@ class QThreadWithReturn(QObject):
                         with contextlib.suppress(RuntimeError, TypeError):
                             self._thread.finished.disconnect()
 
-            # 6. 处理 Qt 事件（确保 deleteLater 生效）
+            # STACK OVERFLOW FIX: REMOVED processEvents() loop
+            # The processEvents() calls here cause cascading cross-instance recursion:
+            # _cleanup_resources() → processEvents() → _perform_delayed_cleanup() → _cleanup_resources() → ...
+            # With 1000 concurrent tasks, this creates infinite recursion and stack overflow.
+            # Qt's event loop will naturally process deleteLater() calls without explicit forcing.
             from PySide6.QtWidgets import QApplication
 
             app = QApplication.instance()
-            if app is not None:
-                # force_stop 场景需要更多的事件处理
-                iterations = 10 if self._is_force_stopped else 5
-                for _ in range(iterations):
-                    app.processEvents()
-                    time.sleep(0.005)  # 5ms
 
             # 7. 延迟清理 Qt 对象
             if app is not None:
