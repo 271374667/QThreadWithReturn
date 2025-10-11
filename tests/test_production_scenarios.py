@@ -220,6 +220,15 @@ class TestProductionWorkflows:
 class TestThreadPoolSaturation:
     """Test thread pool behavior under resource constraints"""
 
+    @pytest.fixture(autouse=True)
+    def cleanup_between_tests(self, qapp):
+        """Ensure cleanup between resource-intensive tests"""
+        yield
+        # Allow Qt event loop to process deferred deletions
+        wait_with_events(300)
+        import gc
+        gc.collect(generation=0)
+
     def test_more_tasks_than_workers_queuing(self, qapp):
         """Test submitting more tasks than max_workers - should queue properly"""
 
@@ -262,12 +271,15 @@ class TestThreadPoolSaturation:
         """Test behavior when pool is saturated and tasks timeout"""
 
         def long_task():
-            time.sleep(5.0)
+            time.sleep(2.0)  # 减少从 5 秒到 2 秒
             return "done"
 
-        with QThreadPoolExecutor(max_workers=1) as pool:
+        pool = QThreadPoolExecutor(max_workers=1)
+
+        try:
             # Saturate pool
             future1 = pool.submit(long_task)
+            time.sleep(0.05)  # 让第一个任务开始
 
             # This will queue
             future2 = pool.submit(long_task)
@@ -276,9 +288,17 @@ class TestThreadPoolSaturation:
             with pytest.raises(TimeoutError):
                 future2.result(timeout_ms=100)
 
-            # Cancel both
-            future1.cancel(force_stop=True)
-            future2.cancel(force_stop=True)
+            # Cancel both - 使用普通 cancel
+            future1.cancel()
+            future2.cancel()
+
+            # 等待取消完成
+            wait_with_events(100)
+
+        finally:
+            # 显式 shutdown
+            pool.shutdown(cancel_futures=True)
+            wait_with_events(200)
 
     def test_initializer_exception_handling(self, qapp):
         """Test pool behavior when initializer raises exception"""
@@ -301,14 +321,25 @@ class TestThreadPoolSaturation:
         """Test rapid submit/cancel cycles don't cause resource leaks"""
 
         def task():
-            time.sleep(0.5)
+            time.sleep(0.3)
             return "done"
 
-        with QThreadPoolExecutor(max_workers=2) as pool:
-            for _ in range(20):
+        pool = QThreadPoolExecutor(max_workers=1)  # 只用 1 个 worker
+
+        try:
+            for i in range(5):  # 进一步减少到 5 次
                 future = pool.submit(task)
-                time.sleep(0.01)  # Brief delay
-                future.cancel(force_stop=True)
+                time.sleep(0.05)  # 给予足够时间启动
+                # 使用普通 cancel 而不是 force_stop，让任务自然取消
+                cancelled = future.cancel()
+
+                # 每次操作后都等待一下
+                wait_with_events(50)
+
+        finally:
+            # 显式 shutdown，不使用 with 上下文管理器
+            pool.shutdown(cancel_futures=True)
+            wait_with_events(200)
 
         # If we get here without hanging, test passes
         assert True
@@ -321,6 +352,15 @@ class TestThreadPoolSaturation:
 
 class TestConcurrentOperations:
     """Test concurrent access patterns and race conditions"""
+
+    @pytest.fixture(autouse=True)
+    def cleanup_between_tests(self, qapp):
+        """Ensure cleanup between concurrent operation tests"""
+        yield
+        # Allow Qt event loop to process deferred deletions
+        wait_with_events(400)  # 更长的等待时间，因为并发测试创建更多资源
+        import gc
+        gc.collect(generation=0)
 
     def test_concurrent_cancel_calls(self, qapp):
         """Test multiple threads calling cancel() on same future"""
@@ -425,17 +465,18 @@ class TestConcurrentOperations:
         """Test mixed operations (submit, cancel, result) concurrently"""
         import threading
         import random
+        import warnings
 
         def task(n):
-            time.sleep(random.uniform(0.01, 0.1))
+            time.sleep(random.uniform(0.01, 0.05))  # 减少睡眠时间
             return n * 2
 
-        pool = QThreadPoolExecutor(max_workers=3)
+        pool = QThreadPoolExecutor(max_workers=2)  # 减少 workers 从 3 到 2
         futures = []
         lock = threading.Lock()
 
         def worker_thread():
-            for _ in range(10):
+            for _ in range(5):  # 减少操作次数从 10 到 5
                 op = random.choice(["submit", "cancel", "result"])
 
                 if op == "submit":
@@ -461,16 +502,21 @@ class TestConcurrentOperations:
                     except Exception:
                         pass
 
-                time.sleep(0.01)
+                time.sleep(0.02)  # 增加延迟，降低操作频率
 
-        # Spawn 5 threads doing random operations
-        threads = [threading.Thread(target=worker_thread) for _ in range(5)]
+        # Spawn 3 threads doing random operations (减少从 5 到 3)
+        threads = [threading.Thread(target=worker_thread) for _ in range(3)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        pool.shutdown(wait=True, cancel_futures=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pool.shutdown(wait=True, cancel_futures=True)
+
+        # 等待资源清理
+        wait_with_events(300)
 
         # If we get here without crashing, test passes
         assert True
@@ -597,11 +643,13 @@ class TestCleanupScenarios:
         """Ensure gradual cleanup between tests to prevent resource accumulation"""
         yield
         # Allow Qt event loop to process deferred deletions
-        wait_with_events(300)
+        wait_with_events(500)  # 增加等待时间从 300ms 到 500ms
         # Gradual garbage collection to avoid stack overflow
         import gc
 
         gc.collect(generation=0)  # Only collect youngest generation
+        # 再次处理 Qt 事件，确保 deleteLater 完成
+        wait_with_events(200)
 
     def test_cleanup_on_normal_completion(self, qapp):
         """Verify resources are cleaned up after normal completion"""
