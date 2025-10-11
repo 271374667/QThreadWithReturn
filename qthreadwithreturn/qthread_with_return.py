@@ -454,32 +454,32 @@ class QThreadPoolExecutor:
             # 复制活跃任务列表
             active_copy = list(self._active_futures)
 
-        # 如果 wait=True，等待活跃任务完成
+        # 如果 wait=True，等待所有任务完成（包括新启动的任务）
         if wait:
             start_time = time.time()
             max_wait_time = 60.0  # 增加到 60 秒以支持长时间运行的任务
 
-            # 轮询等待任务完成
-            while (active_copy or self._pending_tasks) and (time.time() - start_time) < max_wait_time:
-                completed_futures = []
-                for future in active_copy[:]:
-                    try:
-                        if future.done():
-                            completed_futures.append(future)
-                        else:
-                            future.wait(50, force_stop=False)  # 50ms 非阻塞检查
-                    except Exception:
-                        completed_futures.append(future)
+            # 轮询等待所有任务完成
+            # 注意：不能只等待 active_copy，因为 pending_tasks 会被动态启动
+            while (time.time() - start_time) < max_wait_time:
+                # 获取当前所有活跃和待处理的任务（动态检查）
+                with self._counter_lock:
+                    current_active = list(self._active_futures)
+                    current_pending = list(self._pending_tasks)
 
-                # 移除已完成的任务
-                for future in completed_futures:
-                    active_copy.remove(future)
-
-                # 检查是否所有任务都完成
-                if not active_copy and not self._pending_tasks:
+                # 如果没有任务了，退出
+                if not current_active and not current_pending:
                     break
 
-                # 处理 Qt 事件
+                # 检查并等待活跃任务
+                for future in current_active:
+                    try:
+                        if not future.done():
+                            future.wait(50, force_stop=False)  # 50ms 非阻塞检查
+                    except Exception:
+                        pass  # 忽略异常，继续检查其他任务
+
+                # 处理 Qt 事件（允许新任务启动和回调执行）
                 app = QApplication.instance()
                 if app is not None:
                     app.processEvents()

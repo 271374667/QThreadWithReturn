@@ -260,7 +260,7 @@ class TestShutdownWait:
 
     def test_wait_blocks_until_completion(self, process_events):
         """wait=True 应该阻塞直到所有任务完成"""
-        pool = QThreadPoolExecutor(max_workers=3)  # 增加到 3 以确保所有任务都能运行
+        pool = QThreadPoolExecutor(max_workers=2)
         results = []
 
         def task(n):
