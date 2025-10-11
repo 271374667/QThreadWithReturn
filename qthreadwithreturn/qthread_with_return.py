@@ -1040,6 +1040,10 @@ class QThreadWithReturn(QObject):
                 # 清理资源
                 self._clear_callbacks()
                 self._cleanup_resources()
+
+                # POOL CLEANUP FIX: Emit finished_signal so pool can remove future from active set
+                # Without this, shutdown(wait=True) hangs forever waiting for force-stopped futures
+                self.finished_signal.emit()
             else:
                 # 优雅取消路径
                 with contextlib.suppress(AttributeError):

@@ -1,7 +1,6 @@
 import sys
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -12,14 +11,15 @@ def qapp_session():
     else:
         app = QApplication.instance()
 
-    # 设置定时器处理事件循环
-    timer = QTimer()
-    timer.timeout.connect(app.processEvents)
-    timer.start(10)  # 每10ms处理一次事件
+    # DEADLOCK FIX: Removed QTimer that called processEvents() every 10ms
+    # The timer created dangerous nested event loop re-entrancy:
+    # shutdown(wait=True) calls processEvents() → timer fires → nested processEvents() → deadlock
+    # Instead, rely on:
+    # 1. process_events fixture (function-scoped) for test boundary processing
+    # 2. Explicit wait_with_events() calls in tests for mid-test event processing
+    # 3. Internal processEvents() in production code (shutdown polling, result() waiting)
 
     yield app
-
-    timer.stop()
 
 
 @pytest.fixture(autouse=True)
