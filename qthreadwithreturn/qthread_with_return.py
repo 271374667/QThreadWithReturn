@@ -360,7 +360,7 @@ class QThreadPoolExecutor:
         import time
         from PySide6.QtWidgets import QApplication
 
-        # PRIORITY 1: force_stop 最高优先级路径
+        # PRIORITY 1: force_stop 最高优先级路径 - 改进版
         if force_stop:
             # 发出 wait 警告（如果设置了 wait=True）
             if wait:
@@ -380,45 +380,90 @@ class QThreadPoolExecutor:
                 self._pending_tasks.clear()
                 self._active_futures.clear()
 
-            # 对每个任务进行强制停止处理
+            # 对每个任务进行分阶段强制停止处理
             for future in all_tasks:
                 try:
-                    # 1. 标记任务为完成状态
-                    future._mutex.lock()
-                    try:
-                        if not future._is_finished:
-                            future._is_finished = True
-                            future._is_force_stopped = True
-                            future._wait_condition.wakeAll()
-                    finally:
-                        future._mutex.unlock()
-
-                    # 2. 强制终止线程（如果正在运行）
+                    # 第一阶段：请求中断（给线程优雅退出的机会）
                     if future._thread and future._thread.isRunning():
+                        future._thread.requestInterruption()
+                        if hasattr(future, '_worker') and future._worker:
+                            future._worker._should_stop = True
+
+                        # 短暂等待（100ms）
+                        if future._thread.wait(100):
+                            # 优雅退出成功
+                            with contextlib.suppress(Exception):
+                                future._mutex.lock()
+                                try:
+                                    if not future._is_finished:
+                                        future._is_finished = True
+                                        future._is_force_stopped = True
+                                        future._wait_condition.wakeAll()
+                                finally:
+                                    future._mutex.unlock()
+                            continue
+
+                        # 第二阶段：quit（半优雅退出）
+                        future._thread.quit()
+                        if future._thread.wait(200):
+                            # 半优雅退出成功
+                            with contextlib.suppress(Exception):
+                                future._mutex.lock()
+                                try:
+                                    if not future._is_finished:
+                                        future._is_finished = True
+                                        future._is_force_stopped = True
+                                        future._wait_condition.wakeAll()
+                                finally:
+                                    future._mutex.unlock()
+                            continue
+
+                        # 第三阶段：terminate（最后手段）
                         with contextlib.suppress(Exception):
                             future._thread.terminate()
-                            future._thread.wait(1000)
+                            # 关键：等待足够长时间确保线程真正终止
+                            future._thread.wait(2000)
 
-                    # 3. 发射 finished_signal 以触发池的完成处理器
-                    # 这是确保回调执行的关键！
-                    future.finished_signal.emit()
+                    # 安全地标记状态（所有退出路径都执行）
+                    with contextlib.suppress(Exception):
+                        future._mutex.lock()
+                        try:
+                            if not future._is_finished:
+                                future._is_finished = True
+                                future._is_force_stopped = True
+                                future._wait_condition.wakeAll()
+                        finally:
+                            future._mutex.unlock()
+
+                    # 断开池管理的信号连接（防止访问已销毁对象）
+                    with contextlib.suppress(Exception):
+                        if hasattr(future, "_pool_connection"):
+                            future.finished_signal.disconnect(future._pool_connection)
+                            del future._pool_connection
+                        if hasattr(future, "_pool_managed"):
+                            del future._pool_managed
+
+                    # 等待 Qt 事件循环处理信号断开
+                    app = QApplication.instance()
+                    if app is not None:
+                        app.processEvents()
 
                 except Exception as e:
                     print(f"Error force-stopping task: {e}", file=sys.stderr)
 
-            # 4. 处理 Qt 事件确保所有信号被传递和处理
+            # 统一处理 Qt 事件和回调
             app = QApplication.instance()
             if app is not None:
-                # 多次处理事件，给予足够时间让信号传播
-                for _ in range(5):
+                # 多次处理事件，确保所有 deleteLater 和信号完成
+                for _ in range(10):
                     app.processEvents()
-                    time.sleep(0.02)  # 20ms
+                    time.sleep(0.01)  # 10ms
 
-                # 额外的处理确保回调完成
+                # 最终处理确保回调完成
                 time.sleep(0.05)  # 50ms
                 app.processEvents()
 
-            # 5. 检查并调用池级别完成回调
+            # 检查并调用池级别完成回调
             if self._is_pool_complete():
                 self._execute_done_callbacks()
 
@@ -953,19 +998,50 @@ class QThreadWithReturn(QObject):
         if self._thread and self._thread.isRunning():
             self._thread.requestInterruption()
             if force_stop:
+                # 分阶段强制停止策略
                 self._is_force_stopped = True
-                with contextlib.suppress(AttributeError):
-                    if not self._thread.wait(100):
-                        self._thread.terminate()
-                        self._thread.wait(1000)
-                self._thread_really_finished = True
-                # Fix #6: Clear callbacks in force-stop path
+
+                # 第一阶段：请求中断（100ms）
+                if self._thread.wait(100):
+                    # 优雅退出成功
+                    self._thread_really_finished = True
+                    self._clear_callbacks()
+                    self._cleanup_resources()
+                    return True
+
+                # 第二阶段：quit（200ms）
+                with contextlib.suppress(AttributeError, RuntimeError):
+                    self._thread.quit()
+                    if self._thread.wait(200):
+                        # 半优雅退出成功
+                        self._thread_really_finished = True
+                        self._clear_callbacks()
+                        self._cleanup_resources()
+                        return True
+
+                # 第三阶段：terminate（最后手段）
+                with contextlib.suppress(AttributeError, RuntimeError):
+                    self._thread.terminate()
+                    # 关键：等待足够长时间确保线程真正终止
+                    if self._thread.wait(2000):
+                        self._thread_really_finished = True
+                    else:
+                        # 即使 wait 超时，也标记为已完成（线程可能已死锁）
+                        print(
+                            "Warning: Thread did not terminate after 2 seconds, marking as finished anyway",
+                            file=sys.stderr
+                        )
+                        self._thread_really_finished = True
+
+                # 清理资源
                 self._clear_callbacks()
                 self._cleanup_resources()
             else:
+                # 优雅取消路径
                 with contextlib.suppress(AttributeError):
                     self._thread.quit()
                     self._thread.wait(100)
+
         # 确保在取消时也清理资源
         if not force_stop:
             self._cleanup_resources()
@@ -1596,9 +1672,14 @@ class QThreadWithReturn(QObject):
         if self._worker:
             # 只有当信号实际连接时才尝试断开
             if self._signals_connected:
-                with contextlib.suppress(RuntimeError, TypeError):
-                    self._worker._finished_signal.disconnect()
-                    self._worker._error_signal.disconnect()
+                # 使用 warnings 模块抑制 RuntimeWarning
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._worker._finished_signal.disconnect()
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._worker._error_signal.disconnect()
             # 清理worker的父级回调引用
             if hasattr(self._worker, "_parent_result_callback"):
                 self._worker._parent_result_callback = None
@@ -1614,9 +1695,14 @@ class QThreadWithReturn(QObject):
         if self._thread:
             # 只有当信号实际连接时才尝试断开
             if self._signals_connected:
-                with contextlib.suppress(RuntimeError, TypeError):
-                    self._thread.started.disconnect()
-                    self._thread.finished.disconnect()
+                # 使用 warnings 模块抑制 RuntimeWarning
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._thread.started.disconnect()
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._thread.finished.disconnect()
             # Mode-aware cleanup: only use deleteLater() in Qt mode
             if has_qt_app:
                 with contextlib.suppress(RuntimeError, AttributeError):
@@ -1677,7 +1763,7 @@ class QThreadWithReturn(QObject):
         self._failure_callback = None
 
     def _cleanup_resources(self) -> None:
-        """清理资源 - SECURITY HARDENED: Thread-safe with re-entry protection"""
+        """清理资源 - 增强版：支持 force_stop 场景的完善清理"""
         # CRITICAL SECURITY FIX: Prevent concurrent cleanup (deadlock/double-free)
         if not hasattr(self, "_cleanup_lock"):
             return  # Object being destroyed, skip cleanup
@@ -1692,9 +1778,10 @@ class QThreadWithReturn(QObject):
                 return
             self._cleanup_in_progress = True
 
+            # 1. 清理超时定时器
             self._cleanup_timeout_timer()
 
-            # CRITICAL SECURITY FIX: Hardened mutex handling with timeout and logging
+            # 2. 处理 mutex（带超时保护）
             mutex_locked = False
             try:
                 if hasattr(self, "_mutex") and self._mutex is not None:
@@ -1735,26 +1822,74 @@ class QThreadWithReturn(QObject):
             except Exception as e:
                 print(f"Error in mutex cleanup: {e}", file=sys.stderr)
 
-            # Fix #2: Clear callback function references to avoid circular references
-            # CRITICAL: Do NOT clear callbacks here during normal completion!
-            # Callbacks are captured in QTimer closures and clearing them serves no purpose.
-            # Only clear in early-cancel paths (lines 499, 524) where callbacks won't execute.
-            # self._clear_callbacks()  # ← DISABLED - breaks callback execution
-
-            # Fix #5: Explicitly delete Qt synchronization objects AFTER unlocking
-            # Don't delete immediately - let Python's garbage collector handle it
-            # This prevents issues when cleanup is called multiple times
-            try:
-                # Just clear the completion event, don't delete objects
+            # 3. 设置完成事件
+            with contextlib.suppress(Exception):
                 if (
                         hasattr(self, "_completion_event")
                         and self._completion_event is not None
                 ):
-                    self._completion_event.clear()
-            except Exception as e:
-                print(
-                    f"Warning: Failed to clear completion event: {e}", file=sys.stderr
-                )
+                    self._completion_event.set()
+
+            # 4. 断开 worker 信号（force_stop 特别重要）
+            if hasattr(self, "_worker") and self._worker is not None:
+                if self._signals_connected:
+                    # 使用 warnings 模块抑制 RuntimeWarning
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        with contextlib.suppress(RuntimeError, TypeError):
+                            self._worker._finished_signal.disconnect()
+                        with contextlib.suppress(RuntimeError, TypeError):
+                            self._worker._error_signal.disconnect()
+
+                # 清理回调引用
+                if hasattr(self._worker, "_parent_result_callback"):
+                    self._worker._parent_result_callback = None
+                if hasattr(self._worker, "_parent_error_callback"):
+                    self._worker._parent_error_callback = None
+
+            # 5. 断开 thread 信号
+            if hasattr(self, "_thread") and self._thread is not None:
+                if self._signals_connected:
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        with contextlib.suppress(RuntimeError, TypeError):
+                            self._thread.started.disconnect()
+                        with contextlib.suppress(RuntimeError, TypeError):
+                            self._thread.finished.disconnect()
+
+            # 6. 处理 Qt 事件（确保 deleteLater 生效）
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is not None:
+                # force_stop 场景需要更多的事件处理
+                iterations = 10 if self._is_force_stopped else 5
+                for _ in range(iterations):
+                    app.processEvents()
+                    time.sleep(0.005)  # 5ms
+
+            # 7. 延迟清理 Qt 对象
+            if app is not None:
+                if hasattr(self, "_worker") and self._worker is not None:
+                    with contextlib.suppress(RuntimeError, AttributeError):
+                        self._worker.deleteLater()
+                if hasattr(self, "_thread") and self._thread is not None:
+                    with contextlib.suppress(RuntimeError, AttributeError):
+                        self._thread.deleteLater()
+
+            # 8. 清除 Python 引用
+            self._worker = None
+            self._thread = None
+
+            # 9. 清除回调引用（只在 force_stop 时）
+            # CRITICAL: Do NOT clear callbacks here during normal completion!
+            # Callbacks are captured in QTimer closures and clearing them serves no purpose.
+            # Only clear in early-cancel paths where callbacks won't execute.
+            if self._is_force_stopped:
+                self._done_callback = None
+                self._failure_callback = None
 
         finally:
             # Always release cleanup lock
