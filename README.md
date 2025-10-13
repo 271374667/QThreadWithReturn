@@ -155,8 +155,11 @@ if __name__ == '__main__':
 # 使用 uv
 uv add qthreadwithreturn
 
+uv sync # 安装依赖
+
 # 使用 pip  
 pip install qthreadwithreturn
+pip install PySide6 # 如果还没有安装 PySide6 的话(可选)
 ```
 
 ## 📖 API 参考
