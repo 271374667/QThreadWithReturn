@@ -107,11 +107,9 @@ class QThreadWithReturn(QObject):
         self._thread: Optional[QThread] = None
         self._worker: Optional["_Worker"] = None
 
-        # 回调函数
-        self._done_callback: Optional[Callable] = None
-        self._failure_callback: Optional[Callable] = None
-        self._done_callback_params: int = 0  # 记录done_callback需要的参数数量
-        self._failure_callback_params: int = 0  # 记录failure_callback需要的参数数量
+        # 回调函数 - 支持多个回调（与标准库行为一致）
+        self._done_callbacks: list = []  # [(callback, param_count), ...]
+        self._failure_callbacks: list = []  # [(callback, param_count), ...]
 
         # 状态管理
         self._result: Any = None
@@ -151,22 +149,26 @@ class QThreadWithReturn(QObject):
         - 单参数: callback(result)
         - 多参数: callback(a, b, c) - 当返回值是元组时自动解包
 
+        可以多次调用此方法添加多个回调，它们会按添加顺序依次执行。
+
         Args:
             callback: 回调函数。参数数量会自动检测。
 
         Note:
             - 类方法的 self 参数会被自动忽略
             - 如果返回值是元组且回调有多个参数，会自动解包
-            - 后设置的回调会覆盖之前的回调
+            - 多个回调会按注册顺序依次执行（与标准库行为一致）
 
         Example:
             >>> thread.add_done_callback(lambda: print("Done!"))  # 无参数
             >>> thread.add_done_callback(lambda x: print(x))      # 单参数
             >>> thread.add_done_callback(lambda a, b: print(a+b)) # 多参数
+            >>> # 可以添加多个回调
+            >>> thread.add_done_callback(lambda x: print(f"First: {x}"))
+            >>> thread.add_done_callback(lambda x: print(f"Second: {x}"))
         """
         param_count = self._validate_callback(callback, "done_callback")
-        self._done_callback = callback
-        self._done_callback_params = param_count
+        self._done_callbacks.append((callback, param_count))
 
     def add_failure_callback(self, callback: Callable) -> None:
         """添加任务失败后的回调函数。
@@ -175,19 +177,24 @@ class QThreadWithReturn(QObject):
         - 无参数: callback()
         - 单参数: callback(exception)
 
+        可以多次调用此方法添加多个回调，它们会按添加顺序依次执行。
+
         Args:
             callback: 回调函数。
 
         Note:
-            失败回调只支持 0 或 1 个参数，因为异常对象只有一个。
+            - 失败回调只支持 0 或 1 个参数，因为异常对象只有一个
+            - 多个回调会按注册顺序依次执行（与标准库行为一致）
 
         Example:
             >>> thread.add_failure_callback(lambda: print("Failed!"))
             >>> thread.add_failure_callback(lambda e: print(f"Error: {e}"))
+            >>> # 可以添加多个回调
+            >>> thread.add_failure_callback(lambda: print("Cleanup 1"))
+            >>> thread.add_failure_callback(lambda e: print(f"Cleanup 2: {e}"))
         """
         param_count = self._validate_callback(callback, "failure_callback")
-        self._failure_callback = callback
-        self._failure_callback_params = param_count
+        self._failure_callbacks.append((callback, param_count))
 
     add_exception_callback = add_failure_callback  # 别名
 
@@ -721,34 +728,36 @@ class QThreadWithReturn(QObject):
 
         # Fix #3: Fix non-Qt mode QTimer usage - check for Qt application before using QTimer
         # STRESS TEST FIX: Execute callbacks with immediate event processing
-        if self._done_callback:
+        # Execute all registered callbacks in order (standard library behavior)
+        if self._done_callbacks:
             try:
                 from PySide6.QtWidgets import QApplication
 
                 app = QApplication.instance()
-                callback = self._done_callback
-                callback_params = self._done_callback_params
-                if app is not None:
-                    # Qt mode: schedule in event loop
-                    QTimer.singleShot(
-                        0,
-                        lambda r=result,
-                               cb=callback,
-                               cp=callback_params: self._execute_callback_safely(
-                            cb, r, cp, "done_callback"
-                        ),
-                    )
-                    # STACK OVERFLOW FIX: REMOVED app.processEvents() call
-                    # Explicit processEvents() causes cascading recursion across multiple instances:
-                    # Instance A: processEvents() → triggers Instance B: _on_finished() → processEvents() → ...
-                    # Qt's event loop will naturally process these callbacks without explicit forcing.
-                else:
-                    # Non-Qt mode: execute directly
-                    self._execute_callback_safely(
-                        callback, result, callback_params, "done_callback"
-                    )
+                # Create a copy to avoid modification during iteration
+                callbacks_copy = list(self._done_callbacks)
+                for callback, callback_params in callbacks_copy:
+                    if app is not None:
+                        # Qt mode: schedule in event loop
+                        QTimer.singleShot(
+                            0,
+                            lambda r=result,
+                                   cb=callback,
+                                   cp=callback_params: self._execute_callback_safely(
+                                cb, r, cp, "done_callback"
+                            ),
+                        )
+                        # STACK OVERFLOW FIX: REMOVED app.processEvents() call
+                        # Explicit processEvents() causes cascading recursion across multiple instances:
+                        # Instance A: processEvents() → triggers Instance B: _on_finished() → processEvents() → ...
+                        # Qt's event loop will naturally process these callbacks without explicit forcing.
+                    else:
+                        # Non-Qt mode: execute directly
+                        self._execute_callback_safely(
+                            callback, result, callback_params, "done_callback"
+                        )
             except Exception as e:
-                print(f"Error scheduling done callback: {e}", file=sys.stderr)
+                print(f"Error scheduling done callbacks: {e}", file=sys.stderr)
 
         # 发射任务完成信号
         self.finished_signal.emit()
@@ -773,19 +782,20 @@ class QThreadWithReturn(QObject):
     def _execute_done_callback(self, result: Any) -> None:
         """在主线程中执行完成回调（兼容性方法）"""
         try:
-            if (
-                    self._done_callback
-                    and not self._is_cancelled
-                    and not self._is_force_stopped
-            ):
-                self._call_callback_with_result(
-                    self._done_callback,
-                    result,
-                    self._done_callback_params,
-                    "done_callback",
-                )
+            if self._done_callbacks and not self._is_cancelled and not self._is_force_stopped:
+                # Execute all callbacks in order
+                for callback, callback_params in self._done_callbacks:
+                    try:
+                        self._call_callback_with_result(
+                            callback,
+                            result,
+                            callback_params,
+                            "done_callback",
+                        )
+                    except Exception as e:
+                        print(f"Error in done callback: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"Error in done callback: {e}", file=sys.stderr)
+            print(f"Error executing done callbacks: {e}", file=sys.stderr)
 
     def _on_error(self, exception: Exception) -> None:
         """处理线程错误信号"""
@@ -824,30 +834,32 @@ class QThreadWithReturn(QObject):
             self._thread.quit()
 
         # Fix #3: Fix non-Qt mode QTimer usage - check for Qt application before using QTimer
-        if self._failure_callback:
+        # Execute all registered failure callbacks in order (standard library behavior)
+        if self._failure_callbacks:
             try:
                 from PySide6.QtWidgets import QApplication
 
                 app = QApplication.instance()
-                callback = self._failure_callback
-                callback_params = self._failure_callback_params
-                if app is not None:
-                    # Qt mode: schedule in event loop
-                    QTimer.singleShot(
-                        0,
-                        lambda exc=exception,
-                               cb=callback,
-                               cp=callback_params: self._execute_failure_callback_safely(
-                            cb, exc, cp
-                        ),
-                    )
-                else:
-                    # Non-Qt mode: execute directly
-                    self._execute_failure_callback_safely(
-                        callback, exception, callback_params
-                    )
+                # Create a copy to avoid modification during iteration
+                callbacks_copy = list(self._failure_callbacks)
+                for callback, callback_params in callbacks_copy:
+                    if app is not None:
+                        # Qt mode: schedule in event loop
+                        QTimer.singleShot(
+                            0,
+                            lambda exc=exception,
+                                   cb=callback,
+                                   cp=callback_params: self._execute_failure_callback_safely(
+                                cb, exc, cp
+                            ),
+                        )
+                    else:
+                        # Non-Qt mode: execute directly
+                        self._execute_failure_callback_safely(
+                            callback, exception, callback_params
+                        )
             except Exception as e:
-                print(f"Error scheduling failure callback: {e}", file=sys.stderr)
+                print(f"Error scheduling failure callbacks: {e}", file=sys.stderr)
 
         # COUNTER LOCK FIX: Emit finished_signal for failed tasks too
         # Pool completion handler needs to be called regardless of success/failure
@@ -861,18 +873,19 @@ class QThreadWithReturn(QObject):
     def _execute_failure_callback(self, exception: Exception) -> None:
         """在主线程中执行失败回调"""
         try:
-            if (
-                    self._failure_callback
-                    and not self._is_cancelled
-                    and not self._is_force_stopped
-            ):
-                # 对于异常回调，总是传递异常对象（如果callback需要的话）
-                if self._failure_callback_params == 0:
-                    self._failure_callback()
-                else:
-                    self._failure_callback(exception)
+            if self._failure_callbacks and not self._is_cancelled and not self._is_force_stopped:
+                # Execute all failure callbacks in order
+                for callback, callback_params in self._failure_callbacks:
+                    try:
+                        # 对于异常回调，总是传递异常对象（如果callback需要的话）
+                        if callback_params == 0:
+                            callback()
+                        else:
+                            callback(exception)
+                    except Exception as e:
+                        print(f"Error in failure callback: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"Error in failure callback: {e}", file=sys.stderr)
+            print(f"Error executing failure callbacks: {e}", file=sys.stderr)
 
     def _execute_failure_callback_safely(
             self, callback: Callable, exception: Exception, param_count: int
@@ -1023,8 +1036,8 @@ class QThreadWithReturn(QObject):
 
     def _clear_callbacks(self) -> None:
         """Fix #2: Clear callback references to break circular refs"""
-        self._done_callback = None
-        self._failure_callback = None
+        self._done_callbacks.clear()
+        self._failure_callbacks.clear()
 
     def _cleanup_resources(self) -> None:
         """清理资源 - 增强版：支持 force_stop 场景的完善清理"""
@@ -1150,8 +1163,8 @@ class QThreadWithReturn(QObject):
             # Callbacks are captured in QTimer closures and clearing them serves no purpose.
             # Only clear in early-cancel paths where callbacks won't execute.
             if self._is_force_stopped:
-                self._done_callback = None
-                self._failure_callback = None
+                self._done_callbacks.clear()
+                self._failure_callbacks.clear()
 
         finally:
             # Always release cleanup lock
@@ -1256,17 +1269,18 @@ class QThreadWithReturn(QObject):
         # 发射完成信号
         self.finished_signal.emit()
 
-        # 调用完成回调
-        if self._done_callback and not self._is_cancelled:
-            try:
-                self._call_callback_with_result(
-                    self._done_callback,
-                    result,
-                    self._done_callback_params,
-                    "done_callback",
-                )
-            except Exception as e:
-                print(f"Error in done callback: {e}", file=sys.stderr)
+        # 调用完成回调 - 执行所有回调
+        if self._done_callbacks and not self._is_cancelled:
+            for callback, callback_params in self._done_callbacks:
+                try:
+                    self._call_callback_with_result(
+                        callback,
+                        result,
+                        callback_params,
+                        "done_callback",
+                    )
+                except Exception as e:
+                    print(f"Error in done callback: {e}", file=sys.stderr)
 
     def _set_exception(self, exception: Exception) -> None:
         """直接设置异常（用于 QThreadPoolExecutor）"""
@@ -1285,13 +1299,14 @@ class QThreadWithReturn(QObject):
         # 发射完成信号
         self.finished_signal.emit()
 
-        # 调用失败回调
-        if self._failure_callback and not self._is_cancelled:
-            try:
-                # 对于异常回调，总是传递异常对象（如果callback需要的话）
-                if self._failure_callback_params == 0:
-                    self._failure_callback()
-                else:
-                    self._failure_callback(exception)
-            except Exception as e:
-                print(f"Error in failure callback: {e}", file=sys.stderr)
+        # 调用失败回调 - 执行所有回调
+        if self._failure_callbacks and not self._is_cancelled:
+            for callback, callback_params in self._failure_callbacks:
+                try:
+                    # 对于异常回调，总是传递异常对象（如果callback需要的话）
+                    if callback_params == 0:
+                        callback()
+                    else:
+                        callback(exception)
+                except Exception as e:
+                    print(f"Error in failure callback: {e}", file=sys.stderr)

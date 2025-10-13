@@ -1338,8 +1338,8 @@ class TestAdvancedCallbackFeatures:
 
         assert ("test_result", "default") in results, "带默认参数的回调应该正常工作"
 
-    def test_multiple_callbacks_not_supported(self, qapp):
-        """测试多个回调函数（后面的会覆盖前面的）"""
+    def test_multiple_callbacks_supported(self, qapp):
+        """测试多个回调函数支持（与标准库行为一致）"""
         results = []
 
         def callback1(result):
@@ -1350,14 +1350,15 @@ class TestAdvancedCallbackFeatures:
 
         thread = QThreadWithReturn(lambda: "test")
         thread.add_done_callback(callback1)
-        thread.add_done_callback(callback2)  # 这会覆盖callback1
+        thread.add_done_callback(callback2)  # 现在会保留callback1，两者都执行
         thread.start()
         thread.result()
         wait_with_events(200)
 
-        # 只有callback2应该被调用
-        assert "callback2: test" in results, "最后设置的回调应该被调用"
-        assert "callback1: test" not in results, "被覆盖的回调不应该被调用"
+        # 两个回调都应该被调用（与标准库行为一致）
+        assert "callback1: test" in results, "第一个回调应该被调用"
+        assert "callback2: test" in results, "第二个回调应该被调用"
+        assert len(results) == 2, "应该有2个回调被执行"
 
 
 class TestSpecificCodeBranches:
@@ -1933,5 +1934,5 @@ class TestUltraHighCoverageEdgeCases:
         thread._cleanup_resources()
 
         assert thread._is_finished == True
-        assert thread._done_callback is None
-        assert thread._failure_callback is None
+        assert thread._done_callbacks == []
+        assert thread._failure_callbacks == []
