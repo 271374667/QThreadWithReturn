@@ -627,7 +627,7 @@ class TestTimingAndPrecision:
             futures = [pool.submit(task, d) for d in delays]
 
             completed_order = []
-            for future in QThreadPoolExecutor.as_completed(futures, timeout=5.0):
+            for future in QThreadPoolExecutor.as_completed(futures, timeout_ms=5000):
                 result = future.result()
                 completed_order.append(result)
 
@@ -768,7 +768,7 @@ class TestErrorRecoveryUnderStress:
 
             # STRESS TEST FIX: Use as_completed for more efficient processing
             # Instead of waiting for each future in order, process as they complete
-            for future in QThreadPoolExecutor.as_completed(futures, timeout=30.0):
+            for future in QThreadPoolExecutor.as_completed(futures, timeout_ms=30000):
                 try:
                     result = future.result(
                         timeout_ms=100

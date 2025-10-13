@@ -168,7 +168,7 @@ class TestMissingCodeCoverage:
             import concurrent.futures
 
             with pytest.raises(concurrent.futures.TimeoutError):
-                list(QThreadPoolExecutor.as_completed([future], timeout=0.1))
+                list(QThreadPoolExecutor.as_completed([future], timeout_ms=100))
 
 
 @pytest.fixture(scope="session")

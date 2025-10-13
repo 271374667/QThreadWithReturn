@@ -767,20 +767,20 @@ class QThreadPoolExecutor:
 
     @staticmethod
     def as_completed(
-            fs: Iterable["QThreadWithReturn"], timeout: float = -1
+            fs: Iterable["QThreadWithReturn"], timeout_ms: int = -1
     ) -> Iterator["QThreadWithReturn"]:
         """返回一个迭代器，按完成顺序生成 Future 对象。
 
         Args:
             fs: QThreadWithReturn 对象的可迭代集合。
-            timeout: 等待的最大秒数。<=0 表示无超时。
+            timeout_ms: 等待的最大毫秒数。<=0 表示无超时。
 
         Yields:
             QThreadWithReturn: 按完成顺序返回的 Future 对象。
 
         Raises:
-            TimeoutError: 如果在 timeout 秒内没有 Future 完成。
-            TypeError: 如果 timeout 不是数字类型。
+            TimeoutError: 如果在超时时间内没有 Future 完成。
+            TypeError: 如果 timeout_ms 不是数字类型。
 
         Example:
             >>> futures = [pool.submit(task, i) for i in range(5)]
@@ -790,13 +790,15 @@ class QThreadPoolExecutor:
         """
         import time
 
-        # 验证 timeout 参数类型
-        if not isinstance(timeout, (int, float)):
-            raise TypeError(f"timeout must be a number, got {type(timeout).__name__}")
+        # 验证 timeout_ms 参数类型
+        if not isinstance(timeout_ms, (int, float)):
+            raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
+        # 转换为整数毫秒
+        timeout_ms = int(timeout_ms)
         futures = set(fs)
         done = set()
-        start_time = time.monotonic() if timeout > 0 else None
+        start_time = time.monotonic() if timeout_ms > 0 else None
         while futures:
             for fut in list(futures):
                 if fut.done():
@@ -805,9 +807,9 @@ class QThreadPoolExecutor:
                     yield fut
             if not futures:
                 break
-            if timeout > 0:
+            if timeout_ms > 0:
                 elapsed = time.monotonic() - start_time
-                if elapsed > timeout:
+                if elapsed > timeout_ms / 1000.0:  # 转换毫秒为秒
                     raise TimeoutError()
             # CRITICAL FIX: Must process Qt events to allow futures to complete
             # Previously just slept, preventing signal/callback execution

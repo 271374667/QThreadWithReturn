@@ -96,7 +96,7 @@ class TestQThreadPoolExecutor:
             fut2 = pool.submit(simple_function, 1, y=2)
             fut3 = pool.submit(simple_function, 2, y=3)
             completed = []
-            for fut in QThreadPoolExecutor.as_completed([fut1, fut2, fut3], timeout=2.0):
+            for fut in QThreadPoolExecutor.as_completed([fut1, fut2, fut3], timeout_ms=2000):
                 if fut.done():
                     completed.append(
                         fut.result()
@@ -412,7 +412,7 @@ class TestQThreadPoolExecutor:
             import concurrent.futures
 
             with pytest.raises(concurrent.futures.TimeoutError):
-                list(QThreadPoolExecutor.as_completed(futs, timeout=0.01))
+                list(QThreadPoolExecutor.as_completed(futs, timeout_ms=10))
 
 
 @pytest.fixture(scope="session")
@@ -1813,7 +1813,7 @@ class TestSpecificCodeBranches:
 
                 # 简化的as_completed测试
                 completed_futures = list(
-                    QThreadPoolExecutor.as_completed([future], timeout=0.1)
+                    QThreadPoolExecutor.as_completed([future], timeout_ms=100)
                 )
                 assert len(completed_futures) == 1
                 assert completed_futures[0].result() == "instant"
