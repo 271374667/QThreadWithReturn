@@ -122,7 +122,7 @@ if __name__ == '__main__':
 
 1. 逻辑代码和界面代码分离
 2. 创建一个 QThreadWithReturn 对象，传入需要运行的函数和参数
-3. 使用 `add_done_callback` 方法添加成功回调函数
+3. 使用 `add_done_callback` 方法添加成功回调函数(可选,如果不需要结束后修改界面或者获取返回值可以不添加)
 4. 使用 `add_failure_callback` 方法添加失败回调函数(可选,如果不需要处理异常可以不添加)
 5. 调用 `start` 方法启动线程
 
