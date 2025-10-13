@@ -137,6 +137,9 @@ class QThreadWithReturn(QObject):
         self._cleanup_in_progress: bool = False
         self._cleanup_lock: threading.Lock = threading.Lock()
 
+        # THREAD SAFETY FIX: Callback list protection
+        self._callbacks_lock: threading.Lock = threading.Lock()
+
         # STACK OVERFLOW FIX: Prevent recursive _on_finished calls
         self._in_on_finished: bool = False
         self._in_on_error: bool = False
@@ -168,7 +171,8 @@ class QThreadWithReturn(QObject):
             >>> thread.add_done_callback(lambda x: print(f"Second: {x}"))
         """
         param_count = self._validate_callback(callback, "done_callback")
-        self._done_callbacks.append((callback, param_count))
+        with self._callbacks_lock:
+            self._done_callbacks.append((callback, param_count))
 
     def add_failure_callback(self, callback: Callable) -> None:
         """添加任务失败后的回调函数。
@@ -194,7 +198,8 @@ class QThreadWithReturn(QObject):
             >>> thread.add_failure_callback(lambda e: print(f"Cleanup 2: {e}"))
         """
         param_count = self._validate_callback(callback, "failure_callback")
-        self._failure_callbacks.append((callback, param_count))
+        with self._callbacks_lock:
+            self._failure_callbacks.append((callback, param_count))
 
     add_exception_callback = add_failure_callback  # 别名
 
@@ -735,7 +740,8 @@ class QThreadWithReturn(QObject):
 
                 app = QApplication.instance()
                 # Create a copy to avoid modification during iteration
-                callbacks_copy = list(self._done_callbacks)
+                with self._callbacks_lock:
+                    callbacks_copy = list(self._done_callbacks)
                 for callback, callback_params in callbacks_copy:
                     if app is not None:
                         # Qt mode: schedule in event loop
@@ -784,7 +790,9 @@ class QThreadWithReturn(QObject):
         try:
             if self._done_callbacks and not self._is_cancelled and not self._is_force_stopped:
                 # Execute all callbacks in order
-                for callback, callback_params in self._done_callbacks:
+                with self._callbacks_lock:
+                    callbacks_copy = list(self._done_callbacks)
+                for callback, callback_params in callbacks_copy:
                     try:
                         self._call_callback_with_result(
                             callback,
@@ -841,7 +849,8 @@ class QThreadWithReturn(QObject):
 
                 app = QApplication.instance()
                 # Create a copy to avoid modification during iteration
-                callbacks_copy = list(self._failure_callbacks)
+                with self._callbacks_lock:
+                    callbacks_copy = list(self._failure_callbacks)
                 for callback, callback_params in callbacks_copy:
                     if app is not None:
                         # Qt mode: schedule in event loop
@@ -875,7 +884,9 @@ class QThreadWithReturn(QObject):
         try:
             if self._failure_callbacks and not self._is_cancelled and not self._is_force_stopped:
                 # Execute all failure callbacks in order
-                for callback, callback_params in self._failure_callbacks:
+                with self._callbacks_lock:
+                    callbacks_copy = list(self._failure_callbacks)
+                for callback, callback_params in callbacks_copy:
                     try:
                         # 对于异常回调，总是传递异常对象（如果callback需要的话）
                         if callback_params == 0:
@@ -1036,8 +1047,9 @@ class QThreadWithReturn(QObject):
 
     def _clear_callbacks(self) -> None:
         """Fix #2: Clear callback references to break circular refs"""
-        self._done_callbacks.clear()
-        self._failure_callbacks.clear()
+        with self._callbacks_lock:
+            self._done_callbacks.clear()
+            self._failure_callbacks.clear()
 
     def _cleanup_resources(self) -> None:
         """清理资源 - 增强版：支持 force_stop 场景的完善清理"""
@@ -1163,8 +1175,9 @@ class QThreadWithReturn(QObject):
             # Callbacks are captured in QTimer closures and clearing them serves no purpose.
             # Only clear in early-cancel paths where callbacks won't execute.
             if self._is_force_stopped:
-                self._done_callbacks.clear()
-                self._failure_callbacks.clear()
+                with self._callbacks_lock:
+                    self._done_callbacks.clear()
+                    self._failure_callbacks.clear()
 
         finally:
             # Always release cleanup lock
@@ -1271,7 +1284,9 @@ class QThreadWithReturn(QObject):
 
         # 调用完成回调 - 执行所有回调
         if self._done_callbacks and not self._is_cancelled:
-            for callback, callback_params in self._done_callbacks:
+            with self._callbacks_lock:
+                callbacks_to_execute = list(self._done_callbacks)
+            for callback, callback_params in callbacks_to_execute:
                 try:
                     self._call_callback_with_result(
                         callback,
@@ -1301,7 +1316,9 @@ class QThreadWithReturn(QObject):
 
         # 调用失败回调 - 执行所有回调
         if self._failure_callbacks and not self._is_cancelled:
-            for callback, callback_params in self._failure_callbacks:
+            with self._callbacks_lock:
+                callbacks_to_execute = list(self._failure_callbacks)
+            for callback, callback_params in callbacks_to_execute:
                 try:
                     # 对于异常回调，总是传递异常对象（如果callback需要的话）
                     if callback_params == 0:

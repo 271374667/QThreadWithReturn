@@ -350,7 +350,7 @@ class TestThreadPoolSaturation:
 # ============================================================================
 
 
-class TestConcurrentOperations:
+class  TestConcurrentOperations:
     """Test concurrent access patterns and race conditions"""
 
     @pytest.fixture(autouse=True)
