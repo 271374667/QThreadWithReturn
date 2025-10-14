@@ -795,10 +795,9 @@ class QThreadPoolExecutor:
             raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
         # 转换为整数毫秒
-        timeout_ms = int(timeout_ms)
         futures = set(fs)
         done = set()
-        start_time = time.monotonic() if timeout_ms > 0 else None
+        start_time = time.monotonic() if timeout_ms > 0 else 0
         while futures:
             for fut in list(futures):
                 if fut.done():

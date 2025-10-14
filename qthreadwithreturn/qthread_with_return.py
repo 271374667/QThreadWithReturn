@@ -270,17 +270,13 @@ class QThreadWithReturn(QObject):
                 # 第三阶段：terminate（最后手段）
                 with contextlib.suppress(AttributeError, RuntimeError):
                     self._thread.terminate()
-                    # 关键：等待足够长时间确保线程真正终止
-                    if self._thread.wait(2000):
-                        self._thread_really_finished = True
-                    else:
+                    if not self._thread.wait(2000):
                         # 即使 wait 超时，也标记为已完成（线程可能已死锁）
                         print(
                             "Warning: Thread did not terminate after 2 seconds, marking as finished anyway",
                             file=sys.stderr
                         )
-                        self._thread_really_finished = True
-
+                    self._thread_really_finished = True
                 # 清理资源
                 self._clear_callbacks()
                 self._cleanup_resources()
@@ -321,8 +317,6 @@ class QThreadWithReturn(QObject):
         if not isinstance(timeout_ms, (int, float)):
             raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
-        # 转换为整数毫秒
-        timeout_ms = int(timeout_ms)
         if self._thread and self._thread.isRunning():
             raise RuntimeError("Thread is already running")
 
@@ -444,7 +438,6 @@ class QThreadWithReturn(QObject):
             raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
         # 转换为整数毫秒
-        timeout_ms = int(timeout_ms)
         from PySide6.QtWidgets import QApplication
         import threading
 
@@ -528,8 +521,6 @@ class QThreadWithReturn(QObject):
             raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
         # 转换为整数毫秒
-        timeout_ms = int(timeout_ms)
-
         if self._is_cancelled or self._is_force_stopped:
             raise CancelledError()
         if not self._is_finished:
@@ -595,7 +586,6 @@ class QThreadWithReturn(QObject):
             raise TypeError(f"timeout_ms must be a number, got {type(timeout_ms).__name__}")
 
         # 转换为整数毫秒
-        timeout_ms = int(timeout_ms)
         if not self._thread:
             return True
 
@@ -1138,15 +1128,14 @@ class QThreadWithReturn(QObject):
                     self._worker._parent_error_callback = None
 
             # 5. 断开 thread 信号
-            if hasattr(self, "_thread") and self._thread is not None:
-                if self._signals_connected:
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", RuntimeWarning)
-                        with contextlib.suppress(RuntimeError, TypeError):
-                            self._thread.started.disconnect()
-                        with contextlib.suppress(RuntimeError, TypeError):
-                            self._thread.finished.disconnect()
+            if hasattr(self, "_thread") and self._thread is not None and self._signals_connected:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._thread.started.disconnect()
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        self._thread.finished.disconnect()
 
             # STACK OVERFLOW FIX: REMOVED processEvents() loop
             # The processEvents() calls here cause cascading cross-instance recursion:
